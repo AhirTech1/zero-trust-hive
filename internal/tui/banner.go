@@ -6,9 +6,11 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -32,10 +34,12 @@ const asciiLogo = `
                     ██║  ██║██║ ╚████╔╝ ███████╗
                     ╚═╝  ╚═╝╚═╝  ╚═══╝  ╚══════╝`
 
-const (
-	// Version — displayed in the banner tagline.
+var (
+	// Version — displayed in the banner tagline. Overridden by goreleaser via ldflags.
 	Version = "v0.1.0"
+)
 
+const (
 	// Tagline — one-line description under the logo.
 	Tagline = "Universal Zero-Trust Deployment Engine"
 )
@@ -68,6 +72,19 @@ func RenderBanner() string {
 	versionStyle := lipgloss.NewStyle().
 		Foreground(ColorSlate).
 		Align(lipgloss.Center)
+
+	// Get terminal width to prevent ASCII distortion
+	width, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err == nil && width < 100 {
+		// Terminal is too narrow; render a compressed text fallback
+		inner := lipgloss.JoinVertical(
+			lipgloss.Center,
+			logoStyle.Render("ZERO-TRUST HIVE"),
+			taglineStyle.Render(Tagline),
+			versionStyle.Render(fmt.Sprintf("Version %s", Version)),
+		)
+		return BannerStyle.Render(inner)
+	}
 
 	// Thin divider line between logo and tagline.
 	dividerStyle := lipgloss.NewStyle().

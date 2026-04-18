@@ -26,7 +26,7 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w
+      - -s -w -X github.com/zero-trust-hive/cli/internal/tui.Version={{.Version}}
 
   - id: hive-gateway
     main: ./cmd/gateway
