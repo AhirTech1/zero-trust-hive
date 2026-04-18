@@ -6,7 +6,7 @@
 # packaged for a GitHub native release.
 # ─────────────────────────────────────────────────────────────────────────────
 
-version: 1
+version: 2
 
 before:
   hooks:

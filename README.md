@@ -32,11 +32,11 @@ Distributed command execution over QUIC with cryptographic identity, policy-firs
 
 ```mermaid
 flowchart LR
-		CLI[Operator CLI] -->|POST /execute| FW[Semantic Firewall]
-		FW -->|allow| GW[Gateway Router]
-		GW -->|QUIC + TLS1.3 (UDP :443)| AG[Edge Agent]
-		AG --> AD[Execution Adapter]
-		AD --> OUT[Command Output]
+        CLI[Operator CLI] -->|POST /execute| FW[Semantic Firewall]
+        FW -->|allow| GW[Gateway Router]
+        GW -->|"QUIC + TLS1.3 (UDP: 443)"| AG[Edge Agent]
+        AG --> AD[Execution Adapter]
+        AD --> OUT[Command Output]
 ```
 
 ## Core Engine
