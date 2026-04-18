@@ -50,6 +50,8 @@ func main() {
 		runList(os.Args[2:])
 	case "exec":
 		runExec(os.Args[2:])
+	case "help":
+		printHelp()
 	default:
 		fmt.Println(tui.ErrorStyle.Render(fmt.Sprintf("  ✗ Unknown command: %s\n", subcommand)))
 		printUsage()
@@ -64,7 +66,54 @@ func printUsage() {
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    init    "), tui.SubtleStyle.Render("Deploy Phase 1 infrastructure via interactive wizard")))
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    list    "), tui.SubtleStyle.Render("List active Edge Agents connected to the Cloud Gateway")))
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    exec    "), tui.SubtleStyle.Render("Execute a command or forward a payload to an Edge Agent")))
+	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    help    "), tui.SubtleStyle.Render("Show the comprehensive CLI manual")))
 	fmt.Println()
+	fmt.Println(tui.SubtleStyle.Render("  Run 'hive help' for detailed instructions and examples."))
+	fmt.Println()
+}
+
+func printHelp() {
+	fmt.Println(tui.RenderBanner())
+
+	fmt.Println(tui.HeaderStyle.Render("  OPERATOR MANUAL  "))
+	fmt.Println(tui.SubtleStyle.Render(strings.Repeat(tui.DividerChar, 80)))
+	fmt.Println()
+
+	fmt.Println(tui.AccentStyle.Render("  1. DEPLOYMENT (hive init)"))
+	fmt.Println(tui.SubtleStyle.Render("     Launches a beautifully rendered Terminal UI (TUI) wizard that automatically"))
+	fmt.Println(tui.SubtleStyle.Render("     detects your local ~/.aws/credentials. It queries the AWS API to dynamically"))
+	fmt.Println(tui.SubtleStyle.Render("     fetch available Regions, Instance Types, and AMIs for zero-trust provisioning."))
+	fmt.Println()
+	fmt.Println(tui.ValueStyle.Render("     Usage: hive init"))
+	fmt.Println()
+
+	fmt.Println(tui.AccentStyle.Render("  2. FLEET MONITORING (hive list)"))
+	fmt.Println(tui.SubtleStyle.Render("     Queries the Cloud Gateway API and returns a real-time table of all Edge Agents"))
+	fmt.Println(tui.SubtleStyle.Render("     that currently have an active, established QUIC tunnel."))
+	fmt.Println()
+	fmt.Println(tui.ValueStyle.Render("     Usage: hive list"))
+	fmt.Println(tui.WarningStyle.Render("     Requires: HIVE_API_TOKEN environment variable"))
+	fmt.Println()
+
+	fmt.Println(tui.AccentStyle.Render("  3. COMMAND EXECUTION & PROXYING (hive exec)"))
+	fmt.Println(tui.SubtleStyle.Render("     Dispatches payloads down the reverse QUIC tunnel to a specific Edge Agent."))
+	fmt.Println(tui.SubtleStyle.Render("     All commands pass through the Gateway's Semantic API Firewall which blocks"))
+	fmt.Println(tui.SubtleStyle.Render("     destructive OS strings (e.g., rm -rf) and SQL injection attempts."))
+	fmt.Println()
+	fmt.Println(tui.SubtleStyle.Render("     Use JSON Envelopes to bypass shell execution and instruct the Agent Sidecar"))
+	fmt.Println(tui.SubtleStyle.Render("     to securely proxy native HTTP/TCP requests to local databases/microservices."))
+	fmt.Println()
+	fmt.Println(tui.ValueStyle.Render("     Usage: hive exec -target <agent-id> -cmd <payload>"))
+	fmt.Println(tui.WarningStyle.Render("     Requires: HIVE_API_TOKEN environment variable"))
+	fmt.Println()
+	fmt.Println(tui.ValueStyle.Render("     Direct Execution Example:"))
+	fmt.Println(tui.SubtleStyle.Render("     hive exec -target node-01 -cmd 'uptime'"))
+	fmt.Println()
+	fmt.Println(tui.ValueStyle.Render("     Envelope Proxy Example:"))
+	fmt.Println(tui.SubtleStyle.Render("     hive exec -target node-01 -cmd '{\"routing\":{\"protocol\":\"http\",\"target\":\"127.0.0.1:9090\"},\"payload\":\"...\"}'"))
+	fmt.Println()
+
+	fmt.Println(tui.SubtleStyle.Render(strings.Repeat(tui.DividerChar, 80)))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
