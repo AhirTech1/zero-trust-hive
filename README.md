@@ -82,18 +82,18 @@ flowchart LR
 
 Zero-Trust Hive is distributed as statically linked binaries for Linux, macOS, and Windows.
 
-### Method 1: Download Pre-compiled Binaries (Recommended)
+### Method 1: Automated Scripts (Recommended)
 
-You can download the latest version directly from the [Releases Page](https://www.google.com/url?sa=E&source=gmail&q=https://github.com/AhirTech1/zero-trust-hive/releases).
+Use our streamlined installation scripts. They dynamically detect your operating system and CPU architecture (x86_64 or arm64/M-series) and automatically fetch the latest release artifacts securely from GitHub.
 
-**Linux / macOS Quick Install:**
-
+**Linux / macOS:**
 ```bash
-# Download and extract the latest release
-curl -sSfL [https://github.com/AhirTech1/zero-trust-hive/releases/latest/download/zero-trust-hive_Linux_x86_64.tar.gz](https://github.com/AhirTech1/zero-trust-hive/releases/latest/download/zero-trust-hive_Linux_x86_64.tar.gz) | tar -xz
+curl -sSfL https://raw.githubusercontent.com/AhirTech1/zero-trust-hive/main/install.sh | bash
+```
 
-# Move binaries to your PATH
-sudo mv hive gateway agent /usr/local/bin/
+**Windows (PowerShell):**
+```powershell
+iwr https://raw.githubusercontent.com/AhirTech1/zero-trust-hive/main/install.ps1 -useb | iex
 ```
 
 ### Method 2: Build from Source
@@ -101,7 +101,7 @@ sudo mv hive gateway agent /usr/local/bin/
 Ensure you have [Go 1.22+](https://go.dev/dl/) installed.
 
 ```bash
-git clone [https://github.com/AhirTech1/zero-trust-hive.git](https://github.com/AhirTech1/zero-trust-hive.git)
+git clone https://github.com/AhirTech1/zero-trust-hive.git
 cd zero-trust-hive
 
 # Compile all three binaries
@@ -200,21 +200,8 @@ The Sidecar proxy executes the local request, absorbs the private HTTP response,
 
 ## 🤝 Contributing
 
-We welcome contributions to the Zero-Trust Hive engine\! Please see our [Contributing Guidelines](https://www.google.com/search?q=CONTRIBUTING.md) for details on how to submit pull requests, report bugs, and suggest new features.
+We welcome contributions to the Zero-Trust Hive engine! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details on how to submit pull requests, report bugs, and suggest new features.
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the [LICENSE](https://www.google.com/search?q=LICENSE) file for details.
-
-```
-
-***
-
-### What I Fixed:
-1. **The Links:** Replaced the broken placeholder URLs with your actual GitHub username (`AhirTech1/zero-trust-hive`). All the badges for Build Status and Go Version will now light up green dynamically based on your repo's actual state.
-2. **The Diagram:** Rewrote the Mermaid diagram logic so it parses flawlessly without those `Parse error on line 4` issues. It also visually separates the Operator, Cloud, and Edge zones beautifully.
-3. **The Installation Guide:** Added exact `curl` commands showing how to download the exact `.tar.gz` artifacts that your newly fixed GoReleaser pipeline is publishing right now.
-4. **The Flow:** Grouped the usage guide logically: Start Server -> Connect Agent -> Run CLI -> Advanced Proxy.
-
-Push this to your `main` branch. This is the 100k-star presentation you were looking for.
-```
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
