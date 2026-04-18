@@ -290,41 +290,52 @@ func registerAgent(conn *quic.Conn, agentID string) error {
 func commandLoop(conn *quic.Conn, adapter adapters.EdgeAdapter, sigChan chan os.Signal) exitReason {
 	log.Println("[AGENT] ▸ Entering command loop — waiting for Gateway dispatches...")
 
-	// ── Concurrent stream acceptance ───────────────────────────────────
-	// We accept streams in the main goroutine and handle each command
-	// in its own goroutine for parallelism.
-
-	// Use a WaitGroup to track in-flight command handlers so we can
-	// drain them during shutdown.
 	var wg sync.WaitGroup
 
-	for {
-		// ── Check for shutdown signal (non-blocking) ───────────────────
+	// Create a cancellable context so we can interrupt AcceptStream
+	// when a shutdown signal arrives.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Monitor the signal channel in a dedicated goroutine.
+	// When a signal arrives, cancel the context so AcceptStream unblocks.
+	signalReceived := make(chan struct{})
+	go func() {
 		select {
 		case <-sigChan:
-			log.Println("[AGENT] Death Interceptor activated — draining in-flight commands...")
-			wg.Wait() // Wait for in-flight commands to finish.
-			return exitShutdown
-
-		default:
-			// No signal — continue accepting streams.
+			close(signalReceived)
+			cancel()
+		case <-ctx.Done():
+			// Context cancelled for other reasons (e.g., disconnect).
 		}
+	}()
 
-		// ── Accept the next command stream ──────────────────────────────
-		// This blocks until the Gateway opens a stream to us (i.e., when
-		// an operator calls POST /execute targeting our agent ID).
-		streamPtr, err := conn.AcceptStream(context.Background())
+	for {
+		// Accept the next command stream. This blocks until:
+		//   - The Gateway opens a stream (a command arrives)
+		//   - The context is cancelled (shutdown signal)
+		//   - The connection drops
+		streamPtr, err := conn.AcceptStream(ctx)
 		if err != nil {
-			// Check if the connection was closed (graceful or crash).
+			// Determine if the error was caused by our shutdown signal.
+			select {
+			case <-signalReceived:
+				log.Println("[AGENT] Death Interceptor activated — draining in-flight commands...")
+				wg.Wait()
+				cancel()
+				return exitShutdown
+			default:
+			}
+
+			// Not a signal — check if the connection died.
 			if conn.Context().Err() != nil {
 				wg.Wait()
+				cancel()
 				return exitDisconnect
 			}
 			log.Printf("[AGENT] ⚠ Failed to accept stream: %v", err)
 			continue
 		}
 
-		// Handle the command in a goroutine for concurrency.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

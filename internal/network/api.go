@@ -296,7 +296,10 @@ func (api *ControlAPI) handleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Close our write side to signal "command complete" to the agent.
-	stream.CancelWrite(0)
+	// NOTE: We must NOT use CancelWrite() here. CancelWrite sends a
+	// RESET_STREAM frame, which causes the agent's io.ReadAll to receive
+	// an error instead of a clean EOF. stream.Close() sends a proper FIN.
+	stream.Close()
 
 	// ── Read the agent's response ──────────────────────────────────────
 	// Use the same timeout context to prevent blocking on a hung agent.

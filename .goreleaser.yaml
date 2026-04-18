@@ -1,0 +1,79 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Zero-Trust Hive — GoReleaser Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# This configuration defines exactly how the monorepo's three main output
+# binaries (cli, gateway, agent) should be cross-compiled, stripped, and
+# packaged for a GitHub native release.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: hive-cli
+    main: ./cmd/cli
+    binary: hive
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+  - id: hive-gateway
+    main: ./cmd/gateway
+    binary: gateway
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+  - id: hive-agent
+    main: ./cmd/agent
+    binary: agent
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - format: tar.gz
+    # Use standard ZIP compression for Windows arrays; default tar.gz otherwise
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'

@@ -102,7 +102,7 @@ func runExec(args []string) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	fmt.Printf(tui.SubtleStyle.Render("  ▸ Dispatching to %s...\n"), *target)
+	fmt.Println(tui.SubtleStyle.Render(fmt.Sprintf("  ▸ Dispatching to %s...", *target)))
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -165,8 +165,14 @@ func runList(args []string) {
 			}
 			defer resp.Body.Close()
 
+			if resp.StatusCode == http.StatusUnauthorized {
+				fetchErr = fmt.Errorf("authentication failed (HTTP 401) — check HIVE_API_TOKEN")
+				return
+			}
+
 			if resp.StatusCode != 200 {
-				fetchErr = fmt.Errorf("Gateway returned HTTP %d", resp.StatusCode)
+				body, _ := io.ReadAll(resp.Body)
+				fetchErr = fmt.Errorf("Gateway returned HTTP %d: %s", resp.StatusCode, string(body))
 				return
 			}
 
