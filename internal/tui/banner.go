@@ -41,7 +41,7 @@ var (
 
 const (
 	// Tagline — one-line description under the logo.
-	Tagline = "Universal Zero-Trust Deployment Engine"
+	Tagline = "Secure AI Agent Execution Tunnel"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
