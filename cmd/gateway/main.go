@@ -1,8 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Zero-Trust Hive — Cloud Gateway Entry Point
 // ─────────────────────────────────────────────────────────────────────────────
-// The Gateway is the central nervous system of the Zero-Trust Hive. It runs
-// two concurrent services:
+// The Gateway is the central control plane for AI agent execution tunnels.
+// It runs two concurrent services:
 //
 //  1. QUIC Ghost Endpoint (UDP :443)
 //     Accepts mTLS-authenticated QUIC connections from Edge Agents. Each
@@ -131,22 +131,35 @@ func main() {
 	log.Println("  PHASE 4: Starting HTTP Control API")
 	log.Println("═══════════════════════════════════════════════════════")
 
-	// Generate a cryptographically random bearer token for this session.
-	// In production, this would come from a secrets manager or env var.
-	bearerToken := generateBearerToken()
-
-	// Check if a token was provided via environment variable.
-	if envToken := os.Getenv("HIVE_API_TOKEN"); envToken != "" {
-		bearerToken = envToken
-		log.Println("[BOOT] Using bearer token from HIVE_API_TOKEN environment variable")
+	// ── JWT Secret ─────────────────────────────────────────────────────
+	// The JWT signing secret must be provided via HIVE_JWT_SECRET.
+	// If not set, a random secret is generated for this session.
+	jwtSecret := os.Getenv("HIVE_JWT_SECRET")
+	if jwtSecret == "" {
+		jwtSecret = generateBearerToken()
+		log.Println("[BOOT] ⚠ HIVE_JWT_SECRET not set — generated ephemeral secret")
+		log.Println("═══════════════════════════════════════════════════════")
+		log.Printf("  JWT SECRET: %s", jwtSecret)
+		log.Println("  (Set HIVE_JWT_SECRET env var to persist across restarts)")
+		log.Println("═══════════════════════════════════════════════════════")
 	} else {
-		log.Println("═══════════════════════════════════════════════════════")
-		log.Printf("  BEARER TOKEN: %s", bearerToken)
-		log.Println("  (Save this token — it is required for API access)")
-		log.Println("═══════════════════════════════════════════════════════")
+		log.Println("[BOOT] ✓ Using JWT secret from HIVE_JWT_SECRET environment variable")
 	}
 
-	controlAPI := network.NewControlAPI(router, bearerToken)
+	// Generate a default admin token for bootstrapping.
+	bootstrapToken, err := auth.GenerateToken(jwtSecret, "hive-admin", "admin")
+	if err != nil {
+		log.Fatalf("[FATAL] Failed to generate bootstrap token: %v", err)
+	}
+	log.Println("═══════════════════════════════════════════════════════")
+	log.Printf("  BOOTSTRAP JWT (valid 24h):")
+	log.Printf("  %s", bootstrapToken)
+	log.Println("═══════════════════════════════════════════════════════")
+
+	// ── Semantic Firewall ─────────────────────────────────────────────
+	firewall := network.NewSemanticFirewall()
+
+	controlAPI := network.NewControlAPI(router, jwtSecret, firewall)
 
 	// Start the API server in a background goroutine.
 	go func() {
@@ -166,7 +179,8 @@ func main() {
 	log.Println("    • QUIC Ghost Endpoint .... UDP 0.0.0.0:443")
 	log.Println("    • HTTP Control API ....... TCP 0.0.0.0:8080")
 	log.Println("    • Certificate Rotation ... Every 1 hour")
-	log.Println("    • Semantic Firewall ...... Active")
+	log.Println("    • Semantic Firewall ...... Active (AI Hallucination Guard)")
+	log.Println("    • JWT Authentication ..... Active (HMAC-SHA256)")
 	log.Println("    • Zero-Zombie Watchdog ... Active")
 	log.Println("═══════════════════════════════════════════════════════")
 	log.Println("  Press Ctrl+C to initiate graceful shutdown")
@@ -246,7 +260,7 @@ func printBanner() {
               ╚═╝  ╚═╝╚═╝  ╚═══╝  ╚══════╝
 
              ── CLOUD GATEWAY v0.1.0 ──
-           Zero-Trust Deployment Engine
+         Secure AI Agent Execution Tunnel
 ═══════════════════════════════════════════════════════════════`
 
 	fmt.Println(banner)

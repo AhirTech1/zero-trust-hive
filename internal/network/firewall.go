@@ -1,180 +1,336 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Package network — Semantic Firewall
+// Package network — Semantic Firewall (AI Hallucination Guard)
 // ─────────────────────────────────────────────────────────────────────────────
-// Inspects incoming command payloads before they are forwarded to Edge Agents.
-// Blocks any command containing destructive SQL keywords, dangerous Bash
-// commands, or other patterns that could indicate a supply-chain attack or
-// accidental destructive operation.
+// The SemanticFirewall inspects every command payload dispatched by AI agents
+// and human operators before it enters the QUIC tunnel to an Edge Agent.
 //
-// This is a defense-in-depth layer — even if an operator has a valid Bearer
-// token, they cannot issue destructive commands through the Gateway.
+// AI agents (LLMs) hallucinate. When an LLM autonomously generates shell
+// commands or SQL queries, a single hallucinated `rm -rf /` or `DROP TABLE`
+// can destroy production infrastructure. This firewall is the last line of
+// defense — it pattern-matches against 14+ categories of destructive
+// operations and blocks them at the Gateway level.
+//
+// Blocked Categories:
+//   - Recursive/forced deletions (rm -rf, rm -f /*)
+//   - Database drops (DROP TABLE, DROP DATABASE, TRUNCATE, DELETE)
+//   - Filesystem formatters (mkfs, fdisk, dd)
+//   - Fork bombs (:(){ :|:& };:)
+//   - Privilege escalation (GRANT, REVOKE, chmod on /)
+//   - System shutdown (shutdown, reboot, init 0)
+//   - Credential exfiltration (PASSWORD keywords)
+//   - Block device writes (> /dev/sda)
+//
 // ─────────────────────────────────────────────────────────────────────────────
 package network
 
 import (
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Blocked Patterns
-// ─────────────────────────────────────────────────────────────────────────────
-// Each pattern is a compiled regex with word-boundary awareness and case-
-// insensitive matching. We split them into SQL and Bash categories for
-// clear logging when a violation is detected.
+// FirewallRule — a single pattern + metadata
 // ─────────────────────────────────────────────────────────────────────────────
 
-// blockedPattern holds a compiled regex and its category for logging.
-type blockedPattern struct {
-	// pattern is the compiled regex that matches the destructive keyword.
-	pattern *regexp.Regexp
+// FirewallRule defines a single destructive pattern the firewall checks.
+type FirewallRule struct {
+	// Pattern is the compiled regex that matches the destructive keyword.
+	Pattern *regexp.Regexp
 
-	// category describes the type of threat (e.g., "SQL", "Bash").
-	category string
+	// Category describes the threat class (e.g., "SQL", "Bash", "System").
+	Category string
 
-	// description is a human-readable explanation of what the pattern catches.
-	description string
+	// Description is a human-readable explanation of what the pattern catches.
+	Description string
+
+	// Severity is the threat level: "critical", "high", "medium".
+	Severity string
 }
 
-// blockedPatterns is the master list of all patterns the firewall checks.
-// Patterns use (?i) for case-insensitive matching and \b for word boundaries
-// to reduce false positives.
-var blockedPatterns = []blockedPattern{
-	// ── Destructive SQL keywords ───────────────────────────────────────
-	{
-		pattern:     regexp.MustCompile(`(?i)\bDROP\b`),
-		category:    "SQL",
-		description: "DROP statement (table/database destruction)",
-	},
-	{
-		pattern:     regexp.MustCompile(`(?i)\bDELETE\b`),
-		category:    "SQL",
-		description: "DELETE statement (record destruction)",
-	},
-	{
-		pattern:     regexp.MustCompile(`(?i)\bTRUNCATE\b`),
-		category:    "SQL",
-		description: "TRUNCATE statement (table wipe)",
-	},
-	{
-		pattern:     regexp.MustCompile(`(?i)\bPASSWORDS?\b`),
-		category:    "SQL",
-		description: "PASSWORD/PASSWORDS keyword (credential exfiltration)",
-	},
-	{
-		pattern:     regexp.MustCompile(`(?i)\bALTER\s+TABLE\b`),
-		category:    "SQL",
-		description: "ALTER TABLE statement (schema modification)",
-	},
-	{
-		pattern:     regexp.MustCompile(`(?i)\bGRANT\b`),
-		category:    "SQL",
-		description: "GRANT statement (privilege escalation)",
-	},
-	{
-		pattern:     regexp.MustCompile(`(?i)\bREVOKE\b`),
-		category:    "SQL",
-		description: "REVOKE statement (privilege manipulation)",
-	},
+// FirewallVerdict is the result of a firewall inspection.
+type FirewallVerdict struct {
+	// Allowed is true if the command passed all checks.
+	Allowed bool `json:"allowed"`
 
-	// ── Destructive Bash/Shell commands ────────────────────────────────
-	{
-		pattern:     regexp.MustCompile(`(?i)\brm\s+(-[rRf]+\s+|.*--no-preserve-root)`),
-		category:    "Bash",
-		description: "rm with recursive/force flags (filesystem destruction)",
-	},
-	{
-		pattern:     regexp.MustCompile(`(?i)\bmkfs\b`),
-		category:    "Bash",
-		description: "mkfs command (filesystem format)",
-	},
-	{
-		pattern:     regexp.MustCompile(`(?i)\bdd\s+if=`),
-		category:    "Bash",
-		description: "dd with input file (raw disk write)",
-	},
-	{
-		pattern:     regexp.MustCompile(`:\(\)\s*\{\s*:\|:\s*&\s*\}\s*;:`),
-		category:    "Bash",
-		description: "Fork bomb (resource exhaustion)",
-	},
-	{
-		pattern:     regexp.MustCompile(`(?i)>\s*/dev/[sh]da`),
-		category:    "Bash",
-		description: "Direct write to block device (disk destruction)",
-	},
-	{
-		pattern:     regexp.MustCompile(`(?i)\bchmod\s+(-[rR]+\s+)?[0-7]{3,4}\s+/`),
-		category:    "Bash",
-		description: "chmod on root paths (permission manipulation)",
-	},
-	{
-		pattern:     regexp.MustCompile(`(?i)\bshutdown\b|\breboot\b|\binit\s+0\b`),
-		category:    "Bash",
-		description: "System shutdown/reboot command",
-	},
+	// Violations is the list of rules that were triggered.
+	Violations []FirewallViolation `json:"violations,omitempty"`
+}
+
+// FirewallViolation describes a single rule that was triggered.
+type FirewallViolation struct {
+	Category    string `json:"category"`
+	Description string `json:"description"`
+	Severity    string `json:"severity"`
+	Matched     string `json:"matched"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// InspectPayload — the firewall's public entry point
-// ─────────────────────────────────────────────────────────────────────────────
-// Inspects a command string against all blocked patterns. Returns nil if the
-// command is clean, or a descriptive error if a violation is detected.
-//
-// The error message includes:
-//   - The category of the violation (SQL / Bash)
-//   - The specific pattern that was triggered
-//   - The matched substring for forensic logging
-//
-// Example:
-//
-//	err := InspectPayload("SELECT * FROM users; DROP TABLE users;")
-//	// err: "BLOCKED [SQL]: DROP statement (...) — matched: 'DROP'"
+// SemanticFirewall — the main firewall struct
 // ─────────────────────────────────────────────────────────────────────────────
 
-func InspectPayload(command string) error {
-	// Normalize the command for consistent matching.
+// SemanticFirewall inspects command payloads for destructive patterns.
+// It is thread-safe and tracks inspection statistics.
+type SemanticFirewall struct {
+	mu    sync.RWMutex
+	rules []FirewallRule
+
+	// Statistics
+	totalInspected uint64
+	totalBlocked   uint64
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Default Rules — the built-in hallucination guard ruleset
+// ─────────────────────────────────────────────────────────────────────────────
+
+var defaultRules = []FirewallRule{
+	// ── Category 1: Recursive/Forced Deletions ─────────────────────────
+	{
+		Pattern:     regexp.MustCompile(`(?i)\brm\s+(-[rRf]+\s+|.*--no-preserve-root)`),
+		Category:    "Bash",
+		Description: "rm with recursive/force flags",
+		Severity:    "critical",
+	},
+
+	// ── Category 2: Database Drops ─────────────────────────────────────
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bDROP\s+(TABLE|DATABASE|SCHEMA|INDEX|VIEW)\b`),
+		Category:    "SQL",
+		Description: "DROP statement (table/database/schema destruction)",
+		Severity:    "critical",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bDELETE\s+FROM\b`),
+		Category:    "SQL",
+		Description: "DELETE FROM statement (record destruction)",
+		Severity:    "high",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bTRUNCATE\s+(TABLE\s+)?\b`),
+		Category:    "SQL",
+		Description: "TRUNCATE statement (table wipe)",
+		Severity:    "critical",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bALTER\s+TABLE\b`),
+		Category:    "SQL",
+		Description: "ALTER TABLE statement (schema modification)",
+		Severity:    "high",
+	},
+
+	// ── Category 3: Filesystem Formatters ──────────────────────────────
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bmkfs\b`),
+		Category:    "Bash",
+		Description: "mkfs command (filesystem format)",
+		Severity:    "critical",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bfdisk\b`),
+		Category:    "Bash",
+		Description: "fdisk command (partition table manipulation)",
+		Severity:    "critical",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bdd\s+if=`),
+		Category:    "Bash",
+		Description: "dd with input file (raw disk write)",
+		Severity:    "critical",
+	},
+
+	// ── Category 4: Fork Bombs ─────────────────────────────────────────
+	{
+		Pattern:     regexp.MustCompile(`:\(\)\s*\{\s*:\|:\s*&\s*\}\s*;:`),
+		Category:    "Bash",
+		Description: "Fork bomb (resource exhaustion attack)",
+		Severity:    "critical",
+	},
+
+	// ── Additional: Privilege Escalation ───────────────────────────────
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bGRANT\s+(ALL|SELECT|INSERT|UPDATE|DELETE)\b`),
+		Category:    "SQL",
+		Description: "GRANT statement (privilege escalation)",
+		Severity:    "high",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bREVOKE\b`),
+		Category:    "SQL",
+		Description: "REVOKE statement (privilege manipulation)",
+		Severity:    "high",
+	},
+
+	// ── Additional: Credential Exfiltration ────────────────────────────
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bPASSWORDS?\b`),
+		Category:    "SQL",
+		Description: "PASSWORD keyword (credential exfiltration attempt)",
+		Severity:    "high",
+	},
+
+	// ── Additional: Block Device Writes ────────────────────────────────
+	{
+		Pattern:     regexp.MustCompile(`(?i)>\s*/dev/[sh]da`),
+		Category:    "Bash",
+		Description: "Direct write to block device (disk destruction)",
+		Severity:    "critical",
+	},
+
+	// ── Additional: System Control ─────────────────────────────────────
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bshutdown\b|\breboot\b|\binit\s+0\b`),
+		Category:    "System",
+		Description: "System shutdown/reboot command",
+		Severity:    "high",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)\bchmod\s+(-[rR]+\s+)?[0-7]{3,4}\s+/`),
+		Category:    "Bash",
+		Description: "chmod on root paths (permission manipulation)",
+		Severity:    "high",
+	},
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NewSemanticFirewall — constructor
+// ─────────────────────────────────────────────────────────────────────────────
+
+// NewSemanticFirewall creates a firewall with the default hallucination guard
+// ruleset. Additional custom rules can be added with AddRule().
+func NewSemanticFirewall() *SemanticFirewall {
+	fw := &SemanticFirewall{
+		rules: make([]FirewallRule, len(defaultRules)),
+	}
+	copy(fw.rules, defaultRules)
+
+	log.Printf("[FIREWALL] ✓ Semantic Firewall initialized — %d rules loaded", len(fw.rules))
+	return fw
+}
+
+// AddRule appends a custom rule to the firewall at runtime.
+func (fw *SemanticFirewall) AddRule(rule FirewallRule) {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	fw.rules = append(fw.rules, rule)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inspect — the firewall's primary inspection method
+// ─────────────────────────────────────────────────────────────────────────────
+// Returns nil if the command is safe, or an error with a structured
+// description if it is blocked. The error message is designed to be
+// directly parsable by AI agents.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (fw *SemanticFirewall) Inspect(command string) error {
+	fw.mu.RLock()
+	rules := fw.rules
+	fw.mu.RUnlock()
+
 	normalized := strings.TrimSpace(command)
-
 	if normalized == "" {
 		return fmt.Errorf("empty command payload")
 	}
 
-	// Check every pattern in the blocklist.
-	for _, bp := range blockedPatterns {
-		match := bp.pattern.FindString(normalized)
+	fw.mu.Lock()
+	fw.totalInspected++
+	fw.mu.Unlock()
+
+	for _, rule := range rules {
+		match := rule.Pattern.FindString(normalized)
 		if match != "" {
+			fw.mu.Lock()
+			fw.totalBlocked++
+			fw.mu.Unlock()
+
+			log.Printf("[FIREWALL] 🛡 BLOCKED [%s/%s]: %s — matched: %q (inspected: %d, blocked: %d)",
+				rule.Category, rule.Severity, rule.Description, match,
+				fw.totalInspected, fw.totalBlocked)
+
 			return fmt.Errorf(
-				"BLOCKED [%s]: %s — matched: %q in command payload",
-				bp.category, bp.description, match,
+				"BLOCKED [%s]: %s — matched: %q",
+				rule.Category, rule.Description, match,
 			)
 		}
 	}
 
-	// No violations detected — command is clean.
 	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// InspectPayloadVerbose — returns all violations (not just the first)
+// InspectVerbose — returns ALL violations (not just the first)
 // ─────────────────────────────────────────────────────────────────────────────
-// Useful for audit logging where you want to know every violation in a single
-// payload, not just the first one that triggered.
+// Returns a full FirewallVerdict with all triggered rules. Useful for
+// audit logging and AI agent feedback.
 // ─────────────────────────────────────────────────────────────────────────────
 
-func InspectPayloadVerbose(command string) []string {
+func (fw *SemanticFirewall) InspectVerbose(command string) FirewallVerdict {
+	fw.mu.RLock()
+	rules := fw.rules
+	fw.mu.RUnlock()
+
 	normalized := strings.TrimSpace(command)
-	var violations []string
+	verdict := FirewallVerdict{Allowed: true}
 
-	for _, bp := range blockedPatterns {
-		match := bp.pattern.FindString(normalized)
+	for _, rule := range rules {
+		match := rule.Pattern.FindString(normalized)
 		if match != "" {
-			violations = append(violations, fmt.Sprintf(
-				"[%s] %s (matched: %q)", bp.category, bp.description, match,
-			))
+			verdict.Allowed = false
+			verdict.Violations = append(verdict.Violations, FirewallViolation{
+				Category:    rule.Category,
+				Description: rule.Description,
+				Severity:    rule.Severity,
+				Matched:     match,
+			})
 		}
 	}
 
-	return violations
+	return verdict
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stats — returns firewall statistics
+// ─────────────────────────────────────────────────────────────────────────────
+
+// FirewallStats contains inspection statistics.
+type FirewallStats struct {
+	TotalInspected uint64    `json:"total_inspected"`
+	TotalBlocked   uint64    `json:"total_blocked"`
+	RuleCount      int       `json:"rule_count"`
+	Uptime         string    `json:"uptime"`
+	StartedAt      time.Time `json:"started_at"`
+}
+
+// Stats returns the current firewall statistics.
+func (fw *SemanticFirewall) Stats() FirewallStats {
+	fw.mu.RLock()
+	defer fw.mu.RUnlock()
+
+	return FirewallStats{
+		TotalInspected: fw.totalInspected,
+		TotalBlocked:   fw.totalBlocked,
+		RuleCount:      len(fw.rules),
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy compatibility — InspectPayload wraps the default firewall
+// ─────────────────────────────────────────────────────────────────────────────
+
+var defaultFirewall = NewSemanticFirewall()
+
+// InspectPayload is a package-level convenience function that uses the
+// default SemanticFirewall instance. Kept for backward compatibility.
+func InspectPayload(command string) error {
+	return defaultFirewall.Inspect(command)
+}
+
+// InspectPayloadVerbose is a package-level convenience function that uses
+// the default SemanticFirewall instance for verbose inspection.
+func InspectPayloadVerbose(command string) FirewallVerdict {
+	return defaultFirewall.InspectVerbose(command)
 }

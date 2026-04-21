@@ -1,9 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Zero-Trust Hive — GoReleaser Configuration
 # ─────────────────────────────────────────────────────────────────────────────
-# This configuration defines exactly how the monorepo's three main output
-# binaries (cli, gateway, agent) should be cross-compiled, stripped, and
-# packaged for a GitHub native release.
+# Defines how the monorepo's three binaries (hive, gateway, agent) are
+# cross-compiled, stripped, and packaged into a single archive per platform
+# for GitHub Releases.
+#
+# Triggered by: git tag v1.0.0 && git push --tags
 # ─────────────────────────────────────────────────────────────────────────────
 
 version: 2
@@ -11,6 +13,10 @@ version: 2
 before:
   hooks:
     - go mod tidy
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Builds — three binaries, all cross-compiled for Linux, macOS, and Windows
+# ─────────────────────────────────────────────────────────────────────────────
 
 builds:
   - id: hive-cli
@@ -58,12 +64,32 @@ builds:
     ldflags:
       - -s -w
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Archives — bundle ALL THREE binaries into a SINGLE archive per platform
+# ─────────────────────────────────────────────────────────────────────────────
+# This is critical: the install.sh and install.ps1 scripts expect to find
+# hive, gateway, and agent in the same archive file.
+#
+# Archive naming (matches install scripts):
+#   zero-trust-hive_1.0.0_linux_amd64.tar.gz
+#   zero-trust-hive_1.0.0_darwin_arm64.tar.gz
+#   zero-trust-hive_1.0.0_windows_amd64.zip
+# ─────────────────────────────────────────────────────────────────────────────
+
 archives:
-  - format: tar.gz
-    # Use standard ZIP compression for Windows arrays; default tar.gz otherwise
+  - id: default
+    ids:
+      - hive-cli
+      - hive-gateway
+      - hive-agent
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
 
 checksum:
   name_template: 'checksums.txt'
@@ -77,3 +103,35 @@ changelog:
     exclude:
       - '^docs:'
       - '^test:'
+      - '^ci:'
+      - '^chore:'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Release — GitHub Release settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+release:
+  github:
+    owner: AhirTech1
+    name: zero-trust-hive
+  draft: false
+  prerelease: auto
+  name_template: "Zero-Trust Hive {{.Version}}"
+  header: |
+    ## 🐝 Zero-Trust Hive {{.Version}}
+
+    Secure AI Agent Execution Tunnel — `ngrok` for AI agents.
+
+    ### Installation
+
+    **Linux / macOS:**
+    ```bash
+    curl -sSfL https://raw.githubusercontent.com/AhirTech1/zero-trust-hive/main/install.sh | bash
+    ```
+
+    **Windows (PowerShell):**
+    ```powershell
+    iwr https://raw.githubusercontent.com/AhirTech1/zero-trust-hive/main/install.ps1 -useb | iex
+    ```
+  footer: |
+    **Full Changelog**: https://github.com/AhirTech1/zero-trust-hive/compare/{{ .PreviousTag }}...{{ .Tag }}

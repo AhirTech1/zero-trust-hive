@@ -1,20 +1,20 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Package network — HTTP Control API
 // ─────────────────────────────────────────────────────────────────────────────
-// Exposes an HTTP POST endpoint on TCP 0.0.0.0:8080 for operators to dispatch
-// commands to connected Edge Agents via the QUIC routing table.
+// Exposes an HTTP API on TCP 0.0.0.0:8080 for AI Agents (LangChain, AutoGPT,
+// Claude Computer Use) and human operators to dispatch commands to connected
+// Edge Agents through the reverse QUIC tunnel.
 //
 // Security Layers:
-//  1. Bearer Token Authentication — every request must carry a valid token
-//  2. Semantic Firewall — payloads are inspected for destructive patterns
+//  1. JWT Authentication — every request must carry a valid signed JWT
+//  2. Semantic Firewall — AI-hallucinated destructive commands are blocked
 //  3. 5-Second Timeout — prevents deadlocks if an agent hangs
 //
-// Endpoint:
+// Endpoints:
 //
-//	POST /execute
-//	Headers:  Authorization: Bearer <TOKEN>
-//	Body:     {"agent_id": "...", "command": "..."}
-//	Response: {"status": "...", "output": "..."} or {"error": "..."}
+//	POST /execute  — dispatch commands to agents (requires JWT)
+//	GET  /agents   — list connected agents (requires JWT)
+//	GET  /health   — gateway health check (no auth)
 //
 // ─────────────────────────────────────────────────────────────────────────────
 package network
@@ -28,6 +28,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/zero-trust-hive/cli/internal/auth"
 )
 
 const (
@@ -59,15 +61,26 @@ type ExecuteRequest struct {
 }
 
 // ExecuteResponse is the JSON response from POST /execute.
+// Designed for deterministic consumption by LLM tool-calling frameworks
+// (LangChain, OpenAI function calling, Claude tool use).
 type ExecuteResponse struct {
-	// Status is "ok" on success, "error" on failure.
+	// Status is "ok" on success, "blocked" on firewall rejection, "error" on failure.
 	Status string `json:"status"`
 
-	// Output contains the agent's response (on success).
-	Output string `json:"output,omitempty"`
+	// Stdout contains the agent's standard output (on success).
+	Stdout string `json:"stdout,omitempty"`
 
-	// Error contains the error message (on failure).
+	// Stderr contains the agent's standard error stream (on success).
+	Stderr string `json:"stderr,omitempty"`
+
+	// ExitCode is the process exit code (0 = success). Present on success.
+	ExitCode *int `json:"exit_code,omitempty"`
+
+	// Error contains the error message (on failure or block).
 	Error string `json:"error,omitempty"`
+
+	// AgentID echoes back the target agent for correlation.
+	AgentID string `json:"agent_id,omitempty"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,9 +93,11 @@ type ControlAPI struct {
 	// router is the agent routing table for looking up connections.
 	router *Router
 
-	// bearerToken is the expected token for Bearer authentication.
-	// In production, this would come from a secrets manager or env var.
-	bearerToken string
+	// jwtValidator validates incoming JWT Bearer tokens.
+	jwtValidator *auth.JWTValidator
+
+	// firewall is the Semantic Firewall (AI Hallucination Guard).
+	firewall *SemanticFirewall
 
 	// server is the underlying HTTP server (for graceful shutdown).
 	server *http.Server
@@ -92,10 +107,11 @@ type ControlAPI struct {
 // NewControlAPI — constructor
 // ─────────────────────────────────────────────────────────────────────────────
 
-func NewControlAPI(router *Router, bearerToken string) *ControlAPI {
+func NewControlAPI(router *Router, jwtSecret string, firewall *SemanticFirewall) *ControlAPI {
 	api := &ControlAPI{
-		router:      router,
-		bearerToken: bearerToken,
+		router:       router,
+		jwtValidator: auth.NewJWTValidator(jwtSecret),
+		firewall:     firewall,
 	}
 
 	// ── Set up the HTTP mux ────────────────────────────────────────────
@@ -123,8 +139,9 @@ func NewControlAPI(router *Router, bearerToken string) *ControlAPI {
 
 func (api *ControlAPI) Start() error {
 	log.Printf("[API] ✓ Control API listening on %s (TCP/HTTP)", apiListenAddr)
-	log.Printf("[API]   POST /execute — dispatch commands to agents")
-	log.Printf("[API]   GET  /health  — gateway health check")
+	log.Printf("[API]   POST /execute  — dispatch commands to agents (JWT required)")
+	log.Printf("[API]   GET  /agents   — list connected agents (JWT required)")
+	log.Printf("[API]   GET  /health   — gateway health check")
 
 	// ListenAndServe blocks until the server is shut down.
 	if err := api.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -145,15 +162,21 @@ func (api *ControlAPI) Shutdown(ctx context.Context) error {
 // ─────────────────────────────────────────────────────────────────────────────
 // handleHealth — GET /health
 // ─────────────────────────────────────────────────────────────────────────────
-// Returns the gateway's health status and active agent count.
+// Returns the gateway's health status, agent count, and firewall stats.
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (api *ControlAPI) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	stats := api.firewall.Stats()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":        "healthy",
 		"active_agents": api.router.Count(),
 		"agents":        api.router.List(),
+		"firewall": map[string]interface{}{
+			"rules_loaded":    stats.RuleCount,
+			"total_inspected": stats.TotalInspected,
+			"total_blocked":   stats.TotalBlocked,
+		},
 	})
 }
 
@@ -161,17 +184,17 @@ func (api *ControlAPI) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // handleAgents — GET /agents
 // ─────────────────────────────────────────────────────────────────────────────
 // Returns a detailed JSON array of connected agents and their uptimes.
-// Requires Bearer authentication.
+// Requires JWT authentication.
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (api *ControlAPI) handleAgents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	if err := api.authenticateRequest(r); err != nil {
+	if _, err := api.authenticateRequest(r); err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(ExecuteResponse{
 			Status: "error",
-			Error:  "unauthorized: invalid or missing Bearer token",
+			Error:  fmt.Sprintf("unauthorized: %v", err),
 		})
 		return
 	}
@@ -189,26 +212,27 @@ func (api *ControlAPI) handleAgents(w http.ResponseWriter, r *http.Request) {
 // handleExecute — POST /execute
 // ─────────────────────────────────────────────────────────────────────────────
 // The main command dispatch endpoint. Enforces three security layers:
-//   1. Bearer Token Authentication
-//   2. Semantic Firewall Inspection
+//   1. JWT Authentication
+//   2. Semantic Firewall Inspection (Hallucination Guard)
 //   3. 5-Second Agent Communication Timeout
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (api *ControlAPI) handleExecute(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// ── Layer 1: Bearer Token Authentication ───────────────────────────
-	// The Authorization header must contain "Bearer <TOKEN>" where <TOKEN>
-	// matches the configured bearer token exactly.
-	if err := api.authenticateRequest(r); err != nil {
-		log.Printf("[API] ✗ Auth failed from %s: %v", r.RemoteAddr, err)
+	// ── Layer 1: JWT Authentication ────────────────────────────────────
+	claims, err := api.authenticateRequest(r)
+	if err != nil {
+		log.Printf("[API] ✗ JWT auth failed from %s: %v", r.RemoteAddr, err)
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(ExecuteResponse{
 			Status: "error",
-			Error:  "unauthorized: invalid or missing Bearer token",
+			Error:  fmt.Sprintf("unauthorized: %v", err),
 		})
 		return
 	}
+
+	log.Printf("[API] ✓ Authenticated: sub=%q scope=%q", claims.Subject, claims.Scope)
 
 	// ── Parse the request body ─────────────────────────────────────────
 	body := http.MaxBytesReader(w, r.Body, maxRequestBody)
@@ -242,14 +266,17 @@ func (api *ControlAPI) handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Layer 2: Semantic Firewall ─────────────────────────────────────
+	// ── Layer 2: Semantic Firewall (Hallucination Guard) ───────────────
 	// Inspect the command payload for destructive SQL/Bash patterns.
-	if err := InspectPayload(req.Command); err != nil {
-		log.Printf("[API] 🛡 Firewall blocked command to agent %q: %v", req.AgentID, err)
+	// If the AI agent hallucinated a destructive command, block it here.
+	if err := api.firewall.Inspect(req.Command); err != nil {
+		log.Printf("[API] 🛡 Firewall BLOCKED command to agent %q from %q: %v",
+			req.AgentID, claims.Subject, err)
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(ExecuteResponse{
-			Status: "error",
-			Error:  fmt.Sprintf("command blocked by semantic firewall: %v", err),
+			Status:  "blocked",
+			Error:   fmt.Sprintf("Firewall rejected command: %v", err),
+			AgentID: req.AgentID,
 		})
 		return
 	}
@@ -335,41 +362,41 @@ func (api *ControlAPI) handleExecute(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case output := <-responseCh:
-		log.Printf("[API] ✓ Command executed on agent %q (%d bytes response)",
-			req.AgentID, len(output))
+		log.Printf("[API] ✓ Command executed on agent %q by %q (%d bytes response)",
+			req.AgentID, claims.Subject, len(output))
 		stream.Close()
+		exitCode := 0
 		json.NewEncoder(w).Encode(ExecuteResponse{
-			Status: "ok",
-			Output: string(output),
+			Status:   "ok",
+			Stdout:   string(output),
+			Stderr:   "",
+			ExitCode: &exitCode,
+			AgentID:  req.AgentID,
 		})
 	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// authenticateRequest — validates the Bearer token
+// authenticateRequest — validates the JWT Bearer token
 // ─────────────────────────────────────────────────────────────────────────────
-// Expects the Authorization header in the format: "Bearer <TOKEN>"
-// Returns an error if the header is missing, malformed, or the token
-// doesn't match.
+// Expects the Authorization header in the format: "Bearer <JWT>"
+// Returns the validated claims or an error if the token is missing,
+// malformed, expired, or has an invalid signature.
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (api *ControlAPI) authenticateRequest(r *http.Request) error {
+func (api *ControlAPI) authenticateRequest(r *http.Request) (*auth.HiveClaims, error) {
 	authHeader := r.Header.Get("Authorization")
 
 	if authHeader == "" {
-		return fmt.Errorf("missing Authorization header")
+		return nil, fmt.Errorf("missing Authorization header")
 	}
 
 	// Split "Bearer <token>" — must have exactly 2 parts.
 	parts := strings.SplitN(authHeader, " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return fmt.Errorf("malformed Authorization header (expected 'Bearer <token>')")
+		return nil, fmt.Errorf("malformed Authorization header (expected 'Bearer <token>')")
 	}
 
-	token := strings.TrimSpace(parts[1])
-	if token != api.bearerToken {
-		return fmt.Errorf("invalid bearer token")
-	}
-
-	return nil
+	tokenString := strings.TrimSpace(parts[1])
+	return api.jwtValidator.ValidateToken(tokenString)
 }

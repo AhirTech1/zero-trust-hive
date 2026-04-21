@@ -1,18 +1,22 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Zero-Trust Hive — CLI Entry Point (Phase 4 Unified Mode)
+// Zero-Trust Hive — CLI Entry Point
 // ─────────────────────────────────────────────────────────────────────────────
-// Supports subcommands:
+// The operator and AI-agent-facing CLI for Zero-Trust Hive.
 //
-//	hive init                           - Interactive wizard for deployment
-//	hive list                           - Queries gateway for active agents
-//	hive exec -target <id> -cmd <json>  - Dispatches command via Gateway
+// Subcommands:
+//
+//	hive init                           - Generate a .env file with a secure token
+//	hive list                           - Query the Gateway for active agents
+//	hive exec -target <id> -cmd <json>  - Dispatch a command via the Gateway
+//	hive help                           - Print the detailed operator manual
 //
 // ─────────────────────────────────────────────────────────────────────────────
 package main
 
 import (
 	"bytes"
-	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,13 +26,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/huh/spinner"
 	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 
-	hivaws "github.com/zero-trust-hive/cli/internal/aws"
+	"github.com/zero-trust-hive/cli/internal/auth"
 	"github.com/zero-trust-hive/cli/internal/network"
 	"github.com/zero-trust-hive/cli/internal/tui"
 )
@@ -63,7 +65,7 @@ func printUsage() {
 	fmt.Println(tui.RenderBanner())
 	fmt.Println(tui.AccentStyle.Render("  Usage: hive <command> [arguments]"))
 	fmt.Println("\n  Commands:")
-	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    init    "), tui.SubtleStyle.Render("Deploy Phase 1 infrastructure via interactive wizard")))
+	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    init    "), tui.SubtleStyle.Render("Generate a secure .env configuration file")))
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    list    "), tui.SubtleStyle.Render("List active Edge Agents connected to the Cloud Gateway")))
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    exec    "), tui.SubtleStyle.Render("Execute a command or forward a payload to an Edge Agent")))
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    help    "), tui.SubtleStyle.Render("Show the comprehensive CLI manual")))
@@ -79,10 +81,9 @@ func printHelp() {
 	fmt.Println(tui.SubtleStyle.Render(strings.Repeat(tui.DividerChar, 80)))
 	fmt.Println()
 
-	fmt.Println(tui.AccentStyle.Render("  1. DEPLOYMENT (hive init)"))
-	fmt.Println(tui.SubtleStyle.Render("     Launches a beautifully rendered Terminal UI (TUI) wizard that automatically"))
-	fmt.Println(tui.SubtleStyle.Render("     detects your local ~/.aws/credentials. It queries the AWS API to dynamically"))
-	fmt.Println(tui.SubtleStyle.Render("     fetch available Regions, Instance Types, and AMIs for zero-trust provisioning."))
+	fmt.Println(tui.AccentStyle.Render("  1. INITIALIZATION (hive init)"))
+	fmt.Println(tui.SubtleStyle.Render("     Generates a .env file containing a cryptographically secure HIVE_JWT_SECRET"))
+	fmt.Println(tui.SubtleStyle.Render("     and a signed bootstrap JWT token for immediate use."))
 	fmt.Println()
 	fmt.Println(tui.ValueStyle.Render("     Usage: hive init"))
 	fmt.Println()
@@ -92,19 +93,19 @@ func printHelp() {
 	fmt.Println(tui.SubtleStyle.Render("     that currently have an active, established QUIC tunnel."))
 	fmt.Println()
 	fmt.Println(tui.ValueStyle.Render("     Usage: hive list"))
-	fmt.Println(tui.WarningStyle.Render("     Requires: HIVE_API_TOKEN environment variable"))
+	fmt.Println(tui.WarningStyle.Render("     Requires: HIVE_JWT_SECRET environment variable"))
 	fmt.Println()
 
 	fmt.Println(tui.AccentStyle.Render("  3. COMMAND EXECUTION & PROXYING (hive exec)"))
 	fmt.Println(tui.SubtleStyle.Render("     Dispatches payloads down the reverse QUIC tunnel to a specific Edge Agent."))
-	fmt.Println(tui.SubtleStyle.Render("     All commands pass through the Gateway's Semantic API Firewall which blocks"))
-	fmt.Println(tui.SubtleStyle.Render("     destructive OS strings (e.g., rm -rf) and SQL injection attempts."))
+	fmt.Println(tui.SubtleStyle.Render("     All commands pass through the Gateway's Semantic Firewall which blocks"))
+	fmt.Println(tui.SubtleStyle.Render("     AI-hallucinated destructive strings (e.g., rm -rf) and SQL injection."))
 	fmt.Println()
-	fmt.Println(tui.SubtleStyle.Render("     Use JSON Envelopes to bypass shell execution and instruct the Agent Sidecar"))
-	fmt.Println(tui.SubtleStyle.Render("     to securely proxy native HTTP/TCP requests to local databases/microservices."))
+	fmt.Println(tui.SubtleStyle.Render("     Use JSON Envelopes to instruct the Agent Sidecar to proxy native HTTP/TCP"))
+	fmt.Println(tui.SubtleStyle.Render("     requests to local databases, APIs, or microservices."))
 	fmt.Println()
 	fmt.Println(tui.ValueStyle.Render("     Usage: hive exec -target <agent-id> -cmd <payload>"))
-	fmt.Println(tui.WarningStyle.Render("     Requires: HIVE_API_TOKEN environment variable"))
+	fmt.Println(tui.WarningStyle.Render("     Requires: HIVE_JWT_SECRET environment variable"))
 	fmt.Println()
 	fmt.Println(tui.ValueStyle.Render("     Direct Execution Example:"))
 	fmt.Println(tui.SubtleStyle.Render("     hive exec -target node-01 -cmd 'uptime'"))
@@ -132,10 +133,8 @@ func runExec(args []string) {
 		os.Exit(1)
 	}
 
-	token := os.Getenv("HIVE_API_TOKEN")
-	if token == "" {
-		exitWithError("HIVE_API_TOKEN is not set", nil)
-	}
+	// Generate a short-lived JWT from the shared secret.
+	token := getJWT("hive-cli", "execute")
 
 	reqBody := network.ExecuteRequest{
 		AgentID: *target,
@@ -176,8 +175,8 @@ func runExec(args []string) {
 
 	fmt.Println(tui.SuccessStyle.Render("  ✓ Execution Successful:"))
 	fmt.Println()
-	// Simply print the raw output (which might be JSON from the sidecar proxy).
-	fmt.Println(string(execResp.Output))
+	// Print the structured stdout from the agent.
+	fmt.Println(string(execResp.Stdout))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -188,10 +187,8 @@ func runList(args []string) {
 	cmd := flag.NewFlagSet("list", flag.ExitOnError)
 	cmd.Parse(args)
 
-	token := os.Getenv("HIVE_API_TOKEN")
-	if token == "" {
-		exitWithError("HIVE_API_TOKEN is not set. Cannot authenticate to Gateway.", nil)
-	}
+	// Generate a short-lived JWT from the shared secret.
+	token := getJWT("hive-cli", "read")
 
 	req, err := http.NewRequest("GET", gatewayURL+"/agents", nil)
 	if err != nil {
@@ -276,251 +273,85 @@ func runList(args []string) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// runInit — hive init (Phase 1 logic)
+// runInit — hive init (Cloud-Agnostic Bootstrap)
+// ─────────────────────────────────────────────────────────────────────────────
+// Generates a .env file with a cryptographically random HIVE_API_TOKEN and
+// prints clear instructions for deploying the Gateway on any cloud provider.
 // ─────────────────────────────────────────────────────────────────────────────
 
-func runInit(args []string) {
-	cmd := flag.NewFlagSet("init", flag.ExitOnError)
-	cmd.Parse(args)
-
-	ctx := context.Background()
-
+func runInit(_ []string) {
 	fmt.Println(tui.RenderBanner())
-	fmt.Println(tui.SubtleStyle.Render("  Welcome to the Zero-Trust Hive deployment engine."))
-	fmt.Println(tui.SubtleStyle.Render("  This wizard will guide you through configuring your AWS deployment.\n"))
+	fmt.Println(tui.SubtleStyle.Render("  Initializing Zero-Trust Hive configuration...\n"))
 
-	fmt.Println(tui.AccentStyle.Render("  ▸ Scanning for AWS credentials...\n"))
+	// Generate a cryptographically secure 32-byte hex secret.
+	secretBytes := make([]byte, 32)
+	if _, err := rand.Read(secretBytes); err != nil {
+		exitWithError("Failed to generate secure secret — system entropy exhausted", err)
+	}
+	jwtSecret := hex.EncodeToString(secretBytes)
 
-	creds := hivaws.DiscoverCredentials()
-
-	var awsCfg aws.Config
-	var err error
-
-	if creds.Found {
-		fmt.Println(tui.SuccessStyle.Render(fmt.Sprintf("  ✓ Found: %s\n", creds.Source)))
-
-		var useExisting bool
-		confirmForm := huh.NewForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title("Use detected AWS credentials?").
-					Description(fmt.Sprintf("Source: %s", creds.Source)).
-					Affirmative("Yes, use these").
-					Negative("No, enter manually").
-					Value(&useExisting),
-			),
-		).WithTheme(tui.CorporateTheme())
-
-		if err := confirmForm.Run(); err != nil {
-			exitWithError("Credential confirmation cancelled", err)
-		}
-
-		if useExisting {
-			awsCfg, err = hivaws.BuildDefaultConfig(ctx, "")
-			if err != nil {
-				exitWithError("Failed to load AWS configuration", err)
-			}
-			fmt.Println(tui.SuccessStyle.Render("  ✓ AWS credentials loaded successfully.\n"))
-		} else {
-			awsCfg = promptManualCredentials(ctx)
-		}
-	} else {
-		fmt.Println(tui.WarningStyle.Render("  ⚠ No existing AWS credentials detected.\n"))
-		awsCfg = promptManualCredentials(ctx)
+	// Generate a bootstrap JWT token signed with this secret.
+	bootstrapToken, err := auth.GenerateToken(jwtSecret, "hive-admin", "admin")
+	if err != nil {
+		exitWithError("Failed to generate bootstrap JWT", err)
 	}
 
-	var regionOptions []huh.Option[string]
-	spinnerErr := spinner.New().
-		Title("  Fetching available AWS regions...").
-		Action(func() {
-			regionOptions, err = hivaws.FetchRegions(ctx, awsCfg)
-		}).
-		Run()
+	// Write the .env file.
+	envContent := fmt.Sprintf(`# Zero-Trust Hive — Generated Configuration
+# Created by 'hive init'
 
-	if spinnerErr != nil || err != nil {
-		exitWithError("Failed to fetch AWS regions", err)
+# HMAC-SHA256 secret for JWT token signing/validation.
+# The Gateway and CLI must share this secret.
+HIVE_JWT_SECRET=%s
+
+# Bootstrap JWT token (valid 24 hours, scope: admin).
+# Use this immediately to authenticate with the Gateway.
+HIVE_BOOTSTRAP_TOKEN=%s
+`, jwtSecret, bootstrapToken)
+
+	if err := os.WriteFile(".env", []byte(envContent), 0600); err != nil {
+		exitWithError("Failed to write .env file", err)
 	}
 
-	fmt.Println(tui.SuccessStyle.Render(fmt.Sprintf("  ✓ Found %d available regions.\n", len(regionOptions))))
+	fmt.Println(tui.SuccessStyle.Render("  ✓ Generated .env with HIVE_JWT_SECRET and bootstrap token"))
+	fmt.Println()
 
-	var selectedRegion string
-	regionForm := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Select Deployment Region").
-				Description("Choose the AWS region for your deployment.").
-				Options(regionOptions...).
-				Value(&selectedRegion).
-				Height(15),
-		),
-	).WithTheme(tui.CorporateTheme())
+	// Print the deployment instructions.
+	fmt.Println(tui.HeaderStyle.Render("  DEPLOYMENT INSTRUCTIONS  "))
+	divider := tui.SubtleStyle.Render(strings.Repeat(tui.DividerChar, 60))
+	fmt.Println(divider)
+	fmt.Println()
 
-	if err := regionForm.Run(); err != nil {
-		exitWithError("Region selection cancelled", err)
-	}
+	fmt.Println(tui.AccentStyle.Render("  Step 1: Start the Gateway (on your cloud server)"))
+	fmt.Println(tui.SubtleStyle.Render("  Copy the .env file to your server and run:"))
+	fmt.Println()
+	fmt.Println(tui.ValueStyle.Render("    export HIVE_JWT_SECRET=\"" + jwtSecret + "\""))
+	fmt.Println(tui.ValueStyle.Render("    sudo -E gateway"))
+	fmt.Println()
 
-	fmt.Println(tui.AccentStyle.Render(fmt.Sprintf("  ▸ Region selected: %s\n", selectedRegion)))
+	fmt.Println(tui.AccentStyle.Render("  Step 2: Connect an Edge Agent (on your private machine)"))
+	fmt.Println(tui.SubtleStyle.Render("  The agent dials out — no firewall changes needed."))
+	fmt.Println()
+	fmt.Println(tui.ValueStyle.Render("    agent -gateway <SERVER_IP>:443 -id my-private-server"))
+	fmt.Println()
 
-	awsCfg.Region = selectedRegion
+	fmt.Println(tui.AccentStyle.Render("  Step 3: Execute from your AI Agent or CLI"))
+	fmt.Println(tui.SubtleStyle.Render("  Your LangChain/AutoGPT agent authenticates with a signed JWT:"))
+	fmt.Println()
+	fmt.Println(tui.ValueStyle.Render("    POST http://<SERVER_IP>:8080/execute"))
+	fmt.Println(tui.ValueStyle.Render("    Authorization: Bearer <JWT_TOKEN>"))
+	fmt.Println(tui.ValueStyle.Render("    {\"agent_id\": \"my-private-server\", \"command\": \"uptime\"}"))
+	fmt.Println()
+	fmt.Println(divider)
 
-	var instanceOptions []huh.Option[string]
-	spinnerErr = spinner.New().
-		Title(fmt.Sprintf("  Fetching instance types for %s...", selectedRegion)).
-		Action(func() {
-			instanceOptions, err = hivaws.FetchInstanceTypes(ctx, awsCfg)
-		}).
-		Run()
-
-	if spinnerErr != nil || err != nil {
-		exitWithError("Failed to fetch instance types", err)
-	}
-
-	fmt.Println(tui.SuccessStyle.Render(fmt.Sprintf("  ✓ Found %d instance types available.\n", len(instanceOptions))))
-
-	var selectedInstance string
-	instanceForm := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Select Instance Type").
-				Description("Choose the EC2 instance type. Sorted by family.").
-				Options(instanceOptions...).
-				Value(&selectedInstance).
-				Height(15),
-		),
-	).WithTheme(tui.CorporateTheme())
-
-	if err := instanceForm.Run(); err != nil {
-		exitWithError("Instance type selection cancelled", err)
-	}
-
-	fmt.Println(tui.AccentStyle.Render(fmt.Sprintf("  ▸ Instance type selected: %s\n", selectedInstance)))
-
-	var amiOptions []huh.Option[string]
-	spinnerErr = spinner.New().
-		Title(fmt.Sprintf("  Fetching available AMIs for %s...", selectedRegion)).
-		Action(func() {
-			amiOptions, err = hivaws.FetchAMIs(ctx, awsCfg)
-		}).
-		Run()
-
-	if spinnerErr != nil || err != nil {
-		exitWithError("Failed to fetch AMIs", err)
-	}
-
-	fmt.Println(tui.SuccessStyle.Render(fmt.Sprintf("  ✓ Found %d available AMIs.\n", len(amiOptions))))
-
-	var selectedAMI string
-	amiForm := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Select Machine Image (AMI)").
-				Options(amiOptions...).
-				Value(&selectedAMI).
-				Height(15),
-		),
-	).WithTheme(tui.CorporateTheme())
-
-	if err := amiForm.Run(); err != nil {
-		exitWithError("AMI selection cancelled", err)
-	}
-
-	fmt.Println(tui.AccentStyle.Render(fmt.Sprintf("  ▸ AMI selected: %s\n", selectedAMI)))
-
-	var deploymentName string
-	var confirmDeploy bool
-
-	configForm := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Deployment Name").
-				Placeholder("e.g., prod-hive-us-east").
-				Validate(func(s string) error {
-					if len(strings.TrimSpace(s)) < 3 {
-						return fmt.Errorf("must be at least 3 characters")
-					}
-					return nil
-				}).
-				Value(&deploymentName),
-		),
-	).WithTheme(tui.CorporateTheme())
-
-	if err := configForm.Run(); err != nil {
-		exitWithError("Configuration cancelled", err)
-	}
-
-	summary := buildSummaryPanel(deploymentName, selectedRegion, selectedInstance, selectedAMI)
-	fmt.Println(summary)
-
-	confirmForm := huh.NewForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Deploy with these settings?").
-				Affirmative("Yes, deploy").
-				Negative("No, abort").
-				Value(&confirmDeploy),
-		),
-	).WithTheme(tui.CorporateTheme())
-
-	if err := confirmForm.Run(); err != nil {
-		exitWithError("Confirmation cancelled", err)
-	}
-
-	if confirmDeploy {
-		fmt.Println()
-		fmt.Println(tui.SuccessStyle.Render("  ✓ Deployment configuration saved successfully."))
-		fmt.Println(tui.SubtleStyle.Render("  Zero-Trust Hive is ready for deployment."))
-	} else {
-		fmt.Println()
-		fmt.Println(tui.WarningStyle.Render("  ⚠ Deployment aborted by user."))
-	}
+	fmt.Println()
+	fmt.Println(tui.WarningStyle.Render("  ⚠ Keep your .env file secure. It contains your JWT signing secret."))
+	fmt.Println()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-func promptManualCredentials(ctx context.Context) aws.Config {
-	var accessKey, secretKey string
-	credForm := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().Title("AWS Access Key ID").Value(&accessKey),
-			huh.NewInput().Title("AWS Secret Access Key").EchoMode(huh.EchoModePassword).Value(&secretKey),
-		),
-	).WithTheme(tui.CorporateTheme())
-
-	if err := credForm.Run(); err != nil {
-		exitWithError("Credential input cancelled", err)
-	}
-
-	cfg, err := hivaws.BuildStaticConfig(ctx, accessKey, secretKey, "us-east-1")
-	if err != nil {
-		exitWithError("Failed to build AWS configuration", err)
-	}
-
-	fmt.Println(tui.SuccessStyle.Render("  ✓ Credentials accepted.\n"))
-	return cfg
-}
-
-func buildSummaryPanel(name, region, instance, ami string) string {
-	header := tui.HeaderStyle.Render("  DEPLOYMENT SUMMARY  ")
-	divider := tui.SubtleStyle.Render(strings.Repeat(tui.DividerChar, 50))
-
-	labelStyle := lipgloss.NewStyle().Foreground(tui.ColorSlate).Width(22).Align(lipgloss.Right).PaddingRight(2)
-	rows := []string{
-		lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Deployment Name"), tui.ValueStyle.Render(name)),
-		lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Region"), tui.ValueStyle.Render(region)),
-		lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Instance Type"), tui.ValueStyle.Render(instance)),
-		lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Machine Image (AMI)"), tui.ValueStyle.Render(ami)),
-	}
-
-	content := lipgloss.JoinVertical(lipgloss.Left, header, "", divider, "")
-	for _, row := range rows {
-		content = lipgloss.JoinVertical(lipgloss.Left, content, row)
-	}
-	content = lipgloss.JoinVertical(lipgloss.Left, content, "", divider)
-
-	return tui.SummaryPanelStyle.Render(content)
-}
 
 func exitWithError(message string, err error) {
 	fmt.Println()
@@ -530,4 +361,18 @@ func exitWithError(message string, err error) {
 	}
 	fmt.Println()
 	os.Exit(1)
+}
+
+// getJWT reads HIVE_JWT_SECRET and generates a short-lived JWT for API calls.
+func getJWT(subject, scope string) string {
+	secret := os.Getenv("HIVE_JWT_SECRET")
+	if secret == "" {
+		exitWithError("HIVE_JWT_SECRET is not set. Run 'hive init' to generate one.", nil)
+	}
+
+	token, err := auth.GenerateToken(secret, subject, scope)
+	if err != nil {
+		exitWithError("Failed to generate JWT token", err)
+	}
+	return token
 }
