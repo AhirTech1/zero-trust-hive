@@ -32,9 +32,9 @@ jobs:
 
       - name: Verify Build
         run: |
-          go build ./cmd/cli/
-          go build ./cmd/gateway/
-          go build ./cmd/agent/
+          go build -o /dev/null ./cmd/cli/
+          go build -o /dev/null ./cmd/gateway/
+          go build -o /dev/null ./cmd/agent/
           go vet ./...
 
       - name: Run GoReleaser
