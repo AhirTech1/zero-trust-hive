@@ -1,16 +1,8 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# GitHub Actions — Release Pipeline
-# ─────────────────────────────────────────────────────────────────────────────
-# Triggered by pushing a semver tag: git tag v1.0.0 && git push --tags
-# Uses GoReleaser to cross-compile all three binaries (hive, gateway, agent),
-# bundle them into per-platform archives, and publish to GitHub Releases.
-# ─────────────────────────────────────────────────────────────────────────────
-name: Release Zero-Trust Hive
+name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ["v*"]
 
 permissions:
   contents: write
@@ -19,29 +11,23 @@ jobs:
   goreleaser:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Go Environment
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: stable
           cache: true
 
-      - name: Verify Build
-        run: |
-          go build -o /dev/null ./cmd/cli/
-          go build -o /dev/null ./cmd/gateway/
-          go build -o /dev/null ./cmd/agent/
-          go vet ./...
+      - name: Run tests
+        run: go test -race -count=1 ./...
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: '~> v2'
+          version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

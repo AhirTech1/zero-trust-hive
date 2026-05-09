@@ -1,0 +1,9 @@
+---
+blank_issues_enabled: true
+contact_links:
+  - name: Zero-Trust Hive Discussions
+    url: https://github.com/AhirTech1/zero-trust-hive/discussions
+    about: Ask questions and discuss ideas here
+  - name: Security Policy
+    url: https://github.com/AhirTech1/zero-trust-hive/blob/main/SECURITY.md
+    about: How to report security vulnerabilities

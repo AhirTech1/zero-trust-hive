@@ -1,3 +1,24 @@
+# Secrets
 .env
+
+# Build artifacts
 bin/
+*.out
+coverage.out
+/cli
+/gateway
+/agent
+/ai_agent_demo
+
+# OS
 .DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+CLAUDE.md

@@ -15,14 +15,31 @@
                    ╚═╝  ╚═╝╚═╝  ╚═══╝  ╚══════╝
 </pre>
 
-**`ngrok` for AI Agents — A secure, zero-trust execution tunnel that lets cloud AI agents safely operate on your private infrastructure.**
+**`ngrok` for AI Agents — A zero-trust execution tunnel that lets cloud AI agents safely operate on your private infrastructure.**
 
 [![Go Version](https://img.shields.io/github/go-mod/go-version/AhirTech1/zero-trust-hive)](https://golang.org/doc/devel/release.html)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Build Status](https://github.com/AhirTech1/zero-trust-hive/actions/workflows/release.yml/badge.svg)](https://github.com/AhirTech1/zero-trust-hive/actions)
+[![CI](https://github.com/AhirTech1/zero-trust-hive/actions/workflows/ci.yml/badge.svg)](https://github.com/AhirTech1/zero-trust-hive/actions)
 [![Release](https://img.shields.io/github/v/release/AhirTech1/zero-trust-hive?include_prereleases)](https://github.com/AhirTech1/zero-trust-hive/releases)
 
 </div>
+
+---
+
+## Table of Contents
+
+- [The Problem](#the-problem)
+- [The Solution](#the-solution)
+- [Architecture](#architecture)
+- [Security Architecture](#security-architecture)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Try the Demo](#try-the-demo)
+- [API Reference](#api-reference)
+- [Contributing](#contributing)
+- [Security](#security)
+- [Community](#community)
+- [License](#license)
 
 ---
 
@@ -40,7 +57,7 @@ Today, connecting them requires punching holes in your firewall, exposing SSH po
 
 ---
 
-## 🧠 Architecture
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -50,13 +67,13 @@ flowchart LR
     classDef edge fill:#2C3E50,stroke:#27AE60,stroke-width:2px,color:#ECF0F1;
     classDef target fill:#111111,stroke:#E67E22,stroke-width:2px,color:#ECF0F1;
 
-    AI["☁️ Cloud AI Agent<br/>(LangChain / AutoGPT / Claude)"]:::agent
+    AI["Cloud AI Agent<br/>(LangChain / AutoGPT / Claude)"]:::agent
 
     subgraph Gateway ["Zero-Trust Hive Gateway (Cloud Server)"]
-        JWT["JWT Auth<br/>(HMAC-SHA256)"]:::cloud
-        FW["Semantic Firewall<br/>(15 Regex Rules)"]:::firewall
-        API["Control API<br/>(TCP 8080)"]:::cloud
-        QUICGW["QUIC Endpoint<br/>(UDP 443)"]:::cloud
+        JWT["JWT Auth (HMAC-SHA256)"]:::cloud
+        FW["Semantic Firewall (15 Regex Rules)"]:::firewall
+        API["Control API (TCP 8080)"]:::cloud
+        QUICGW["QUIC Endpoint (UDP 443)"]:::cloud
     end
 
     subgraph Private ["Your Private Network (Zero Inbound Ports)"]
@@ -68,8 +85,8 @@ flowchart LR
     AI -->|"POST /execute + JWT"| JWT
     JWT -->|"Claims Validated"| API
     API -->|"Inspect Command"| FW
-    FW -.->|"✅ Safe → Forward"| QUICGW
-    FW -.->|"🛡 Blocked → HTTP 403"| AI
+    FW -.->|"Safe — Forward"| QUICGW
+    FW -.->|"Blocked — HTTP 403"| AI
 
     EdgeAgent <-->|"Encrypted mTLS QUIC Tunnel<br/>(Ephemeral Certs, Hourly Rotation)"| QUICGW
 
@@ -81,19 +98,19 @@ The system ships as three purpose-built Go binaries:
 
 | Binary | Role | Where It Runs |
 |:-------|:-----|:--------------|
-| **`gateway`** | JWT-authenticated API → Semantic Firewall → QUIC listener | Your cloud server (public IP) |
-| **`agent`** | Reverse tunnel anchor → local execution & sidecar proxy | Your private machine (no inbound ports) |
+| **`gateway`** | JWT-authenticated API, Semantic Firewall, QUIC listener | Your cloud server (public IP) |
+| **`agent`** | Reverse tunnel anchor, local execution & sidecar proxy | Your private machine (no inbound ports) |
 | **`hive`** | Operator CLI for bootstrapping, fleet monitoring, and dispatch | Your laptop / CI pipeline |
 
 ---
 
-## 🛡️ Security Architecture
+## Security Architecture
 
-Zero-Trust Hive enforces **three layers of security** on every request before a command reaches your private machine:
+Zero-Trust Hive enforces **three layers of security** on every request:
 
 ### Layer 1: JWT Authentication (HMAC-SHA256)
 
-Every API request must carry a signed JWT in the `Authorization: Bearer <token>` header. The Gateway validates the signature against a shared `HIVE_JWT_SECRET`, then extracts the claims (`sub`, `scope`, `exp`) for audit logging. Static API tokens are gone — tokens are cryptographically signed, scoped (`execute`, `read`, `admin`), and expire after 24 hours.
+Every API request must carry a signed JWT in the `Authorization: Bearer <token>` header. Tokens are cryptographically signed, scoped (`execute`, `read`, `admin`), and expire after 24 hours.
 
 ```
 Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
@@ -104,43 +121,31 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
 
 ### Layer 2: Semantic Firewall (AI Hallucination Guard)
 
-The Semantic Firewall is a struct-based inspection engine with **15 compiled regular expressions** that intercept destructive commands at the Gateway — before they ever enter the QUIC tunnel. It blocks:
+The Semantic Firewall uses **15 compiled regular expressions** to intercept destructive commands at the Gateway *before* they enter the QUIC tunnel:
 
 | Category | Blocked Patterns | Severity |
 |:---------|:-----------------|:---------|
-| **Recursive Deletions** | `rm -rf`, `rm -f /*`, `--no-preserve-root` | 🔴 Critical |
-| **Database Drops** | `DROP TABLE`, `DROP DATABASE`, `TRUNCATE`, `DELETE FROM` | 🔴 Critical |
-| **Filesystem Formatters** | `mkfs`, `fdisk`, `dd if=` | 🔴 Critical |
-| **Fork Bombs** | `:(){ :\|:& };:` | 🔴 Critical |
-| **Block Device Writes** | `> /dev/sda`, `> /dev/hda` | 🔴 Critical |
-| **Privilege Escalation** | `GRANT ALL`, `REVOKE`, `ALTER TABLE` | 🟠 High |
-| **System Control** | `shutdown`, `reboot`, `init 0` | 🟠 High |
-| **Credential Exfiltration** | `PASSWORD`, `PASSWORDS` | 🟠 High |
-| **Permission Manipulation** | `chmod 777 /`, `chmod -R` on root paths | 🟠 High |
-
-When a command is blocked, the API immediately returns an **HTTP 403** with AI-parsable JSON:
-
-```json
-{
-  "status": "blocked",
-  "error": "Firewall rejected command: BLOCKED [Bash]: rm with recursive/force flags — matched: \"rm -rf\"",
-  "agent_id": "production-server-01"
-}
-```
-
-The firewall also tracks live statistics (total inspected, total blocked, rules loaded) exposed via `GET /health`.
+| **Recursive Deletions** | `rm -rf`, `rm -f /*`, `--no-preserve-root` | Critical |
+| **Database Drops** | `DROP TABLE`, `DROP DATABASE`, `TRUNCATE`, `DELETE FROM` | Critical |
+| **Filesystem Formatters** | `mkfs`, `fdisk`, `dd if=` | Critical |
+| **Fork Bombs** | `:(){ :\|:& };:` | Critical |
+| **Block Device Writes** | `> /dev/sda`, `> /dev/hda` | Critical |
+| **Privilege Escalation** | `GRANT ALL`, `REVOKE`, `ALTER TABLE` | High |
+| **System Control** | `shutdown`, `reboot`, `init 0` | High |
+| **Credential Exfiltration** | `PASSWORD`, `PASSWORDS` | High |
+| **Permission Manipulation** | `chmod 777 /`, `chmod -R` on root paths | High |
 
 ### Layer 3: Ephemeral In-Memory Cryptography
 
-All mTLS certificates are RSA 2048, generated entirely in RAM at boot, and rotate hourly via a background goroutine. Private keys **never touch disk**, eliminating credential theft from compromised filesystems. The QUIC tunnel enforces TLS 1.3 minimum with `h3` / `hive-quic` ALPN negotiation.
+All mTLS certificates are RSA 2048, generated in RAM at boot, and rotated hourly via a background goroutine. **Private keys never touch disk.** QUIC tunnel enforces TLS 1.3 minimum.
 
-### Bonus: Zero-Inbound Architecture
+### Zero-Inbound Architecture
 
-The Edge Agent initiates an *outbound-only* QUIC connection over UDP 443. Your private machine opens **zero listening ports**. It is invisible to Shodan, Censys, and any external port scanner. There is no attack surface to exploit.
+The Edge Agent initiates an **outbound-only** QUIC connection over UDP 443. Your private machine opens **zero listening ports** — invisible to Shodan, Censys, and any external scanner.
 
 ---
 
-## 🚀 Installation
+## Installation
 
 ### Automated Install (Recommended)
 
@@ -154,22 +159,26 @@ curl -sSfL https://raw.githubusercontent.com/AhirTech1/zero-trust-hive/main/inst
 iwr https://raw.githubusercontent.com/AhirTech1/zero-trust-hive/main/install.ps1 -useb | iex
 ```
 
+### Docker
+
+```bash
+docker build -t zero-trust-hive .
+docker run -p 443:443/udp -p 8080:8080 -e HIVE_JWT_SECRET="your-secret" zero-trust-hive
+```
+
 ### Build from Source
 
-Requires [Go 1.22+](https://go.dev/dl/).
+Requires [Go 1.26+](https://go.dev/dl/).
 
 ```bash
 git clone https://github.com/AhirTech1/zero-trust-hive.git
 cd zero-trust-hive
-
-go build -o bin/hive    ./cmd/cli
-go build -o bin/gateway ./cmd/gateway
-go build -o bin/agent   ./cmd/agent
+make build
 ```
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
 ### 1. Bootstrap Configuration
 
@@ -177,26 +186,19 @@ go build -o bin/agent   ./cmd/agent
 ./bin/hive init
 ```
 
-This generates a `.env` file containing:
-- `HIVE_JWT_SECRET` — a cryptographically random 64-character HMAC signing key
-- `HIVE_BOOTSTRAP_TOKEN` — a pre-signed admin JWT valid for 24 hours
+Generates `.env` with `HIVE_JWT_SECRET` (64-char hex) and a pre-signed admin JWT.
 
-### 2. Start the Gateway (Cloud Server)
+### 2. Start the Gateway
 
 ```bash
 export HIVE_JWT_SECRET="<your_secret_from_.env>"
 sudo -E ./bin/gateway
-# ✓ QUIC Ghost Endpoint .... UDP 0.0.0.0:443
-# ✓ HTTP Control API ....... TCP 0.0.0.0:8080
-# ✓ Semantic Firewall ...... Active (15 rules)
-# ✓ JWT Authentication ..... Active (HMAC-SHA256)
 ```
 
-### 3. Connect an Edge Agent (Private Machine)
+### 3. Connect an Edge Agent
 
 ```bash
 ./bin/agent -gateway <GATEWAY_IP>:443 -id my-private-server
-# The agent dials OUT — no firewall changes needed.
 ```
 
 ### 4. Execute Commands
@@ -204,19 +206,12 @@ sudo -E ./bin/gateway
 **From the CLI:**
 ```bash
 export HIVE_JWT_SECRET="<your_secret>"
-
-# List all connected agents
 hive list
-
-# Execute a safe command
 hive exec -target my-private-server -cmd "uptime"
-
-# Read the full operator manual
-hive help
 ```
 
-**From your AI Agent (any language — it's just HTTP):**
-```go
+**From your AI Agent — any language, just HTTP:**
+```http
 POST http://<GATEWAY_IP>:8080/execute
 Authorization: Bearer <signed_jwt>
 Content-Type: application/json
@@ -224,82 +219,40 @@ Content-Type: application/json
 {"agent_id": "my-private-server", "command": "cat /var/log/app/errors.log | tail -50"}
 ```
 
-**Structured JSON Response:**
-```json
-{
-  "status": "ok",
-  "stdout": " 14:22:01 up 3 days, 4:12, 2 users, load average: 0.15, 0.10, 0.05",
-  "stderr": "",
-  "exit_code": 0,
-  "agent_id": "my-private-server"
-}
-```
-
 ---
 
-## 🧪 Try the Demo (Two Terminals, 30 Seconds)
+## Try the Demo
 
-The repository includes a self-contained Go demo that simulates an AI agent communicating with the Gateway. It demonstrates both the **Happy Path** and the **Blocked Hallucination Path** — no external dependencies required.
+A self-contained Go demo that simulates AI agent scenarios — no external dependencies.
 
-**Terminal 1 — Start the Gateway:**
+**Terminal 1:**
 ```bash
 export HIVE_JWT_SECRET="demo-secret-do-not-use-in-prod"
 go run cmd/gateway/main.go
 ```
 
-**Terminal 2 — Run the AI Agent Demo:**
+**Terminal 2:**
 ```bash
 go run examples/ai_agent_demo/main.go
 ```
 
-The demo automatically runs three scenarios:
+The demo runs three scenarios:
 
 | Scenario | Command Sent | Result |
 |:---------|:-------------|:-------|
-| ✅ Happy Path | `uptime` | Passes firewall → executes on agent → returns `stdout` |
-| 🛡 Bash Hallucination | `rm -rf /var/log` | **BLOCKED** — HTTP 403, private machine untouched |
-| 🛡 SQL Injection | `DROP TABLE users CASCADE` | **BLOCKED** — HTTP 403, database safe |
-
-The demo generates JWTs, formats colored terminal output, and pretty-prints the Gateway's structured JSON responses so you can experience the security model firsthand.
+| Happy Path | `uptime` | Passes firewall, executes, returns stdout |
+| Bash Hallucination | `rm -rf /var/log` | **BLOCKED** — HTTP 403 |
+| SQL Injection | `DROP TABLE users CASCADE` | **BLOCKED** — HTTP 403 |
 
 ---
 
-## 📦 Envelope Routing (Database & API Proxying)
+## API Reference
 
-Beyond shell commands, the Edge Agent's Sidecar Proxy can forward structured HTTP/TCP traffic to local-only services using JSON **Envelope Routing**. Your AI agent can query a private PostgreSQL instance or hit an internal REST API on `localhost:9090` — securely, through the encrypted tunnel.
+### `POST /execute` — Dispatch a command
 
-```bash
-hive exec -target my-private-server -cmd '{
-  "routing": {
-    "protocol": "http",
-    "target": "127.0.0.1:5432"
-  },
-  "payload_format": "json",
-  "payload": "{\"query\": \"SELECT count(*) FROM orders WHERE status = '\''pending'\''\"}"
-}'
 ```
-
-The Sidecar opens a local connection, sends the payload, collects the response, and returns it through the QUIC tunnel — all without the private service ever being exposed to the internet.
-
----
-
-## 🔧 Environment Variables
-
-| Variable | Required | Description |
-|:---------|:---------|:------------|
-| `HIVE_JWT_SECRET` | **Yes** | HMAC-SHA256 signing key for JWT authentication. Shared between Gateway, CLI, and AI agents. Generated by `hive init`. |
-
----
-
-## 📐 API Reference
-
-### `POST /execute` — Dispatch a command to an Edge Agent
-
-**Headers:** `Authorization: Bearer <JWT>`, `Content-Type: application/json`
-
-**Request Body:**
-```json
-{"agent_id": "my-server", "command": "uptime"}
+Headers: Authorization: Bearer <JWT>, Content-Type: application/json
+Body:    {"agent_id": "my-server", "command": "uptime"}
 ```
 
 **Success (200):**
@@ -314,21 +267,63 @@ The Sidecar opens a local connection, sends the payload, collects the response, 
 
 **Auth Failure (401):**
 ```json
-{"status": "error", "error": "unauthorized: token validation failed: ..."}
+{"status": "error", "error": "unauthorized: ..."}
 ```
 
-### `GET /agents` — List connected Edge Agents
-**Headers:** `Authorization: Bearer <JWT>`
+### `GET /agents` — List connected agents
 
-### `GET /health` — Gateway health check (no auth)
+```
+Headers: Authorization: Bearer <JWT>
+```
+
+### `GET /health` — Gateway health (no auth)
+
 Returns agent count, firewall stats, and service status.
+
+### Envelope Routing (Database & API Proxying)
+
+```bash
+hive exec -target my-private-server -cmd '{
+  "routing": {"protocol": "http", "target": "127.0.0.1:5432"},
+  "payload_format": "json",
+  "payload": "{\"query\": \"SELECT count(*) FROM orders\"}"
+}'
+```
 
 ---
 
-## 🤝 Contributing
+## Environment Variables
 
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details on submitting pull requests and reporting bugs.
+| Variable | Required | Description |
+|:---------|:---------|:------------|
+| `HIVE_JWT_SECRET` | Yes | HMAC-SHA256 signing key shared between Gateway, CLI, and AI agents |
 
-## 📜 License
+---
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+## Contributing
+
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, commit standards, and architectural guidelines.
+
+Before submitting a PR:
+1. `make check` — runs lint, vet, and tests
+2. Ensure Go doc comments on all exported identifiers
+3. Security-sensitive paths require additional review (see [CODEOWNERS](.github/CODEOWNERS))
+
+---
+
+## Security
+
+For vulnerability reporting, see [SECURITY.md](SECURITY.md). **Do not open a public issue for security bugs** — email `security@zerotrusthive.dev`.
+
+---
+
+## Community
+
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Changelog](CHANGELOG.md)
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE) for details.

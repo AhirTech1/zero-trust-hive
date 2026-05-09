@@ -1,0 +1,7 @@
+# Core maintainers — all paths unless overridden
+* @AhirTech1
+
+# Security-sensitive paths — requires security-domain review
+/internal/auth/       @AhirTech1
+/internal/network/    @AhirTech1
+cmd/gateway/          @AhirTech1
