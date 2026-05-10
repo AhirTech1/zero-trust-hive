@@ -26,7 +26,7 @@ linters-settings:
     excludes:
       - G402  # TLS InsecureSkipVerify — intentional for self-signed ephemeral certs
   goimports:
-    local-prefixes: github.com/zero-trust-hive/cli
+    local-prefixes: github.com/AhirTech1/zero-trust-hive
   misspell:
     locale: US
 

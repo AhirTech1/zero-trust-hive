@@ -17,7 +17,7 @@ build:
 # Build with version injection (set VERSION env var)
 build-release:
 	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -ldflags "-s -w -X github.com/zero-trust-hive/cli/internal/tui.Version=$(VERSION)" -o $(BIN_DIR)/hive    ./cmd/cli
+	$(GOBUILD) -ldflags "-s -w -X github.com/AhirTech1/zero-trust-hive/internal/tui.Version=$(VERSION)" -o $(BIN_DIR)/hive    ./cmd/cli
 	$(GOBUILD) -ldflags "-s -w" -o $(BIN_DIR)/gateway ./cmd/gateway
 	$(GOBUILD) -ldflags "-s -w" -o $(BIN_DIR)/agent   ./cmd/agent
 
@@ -41,7 +41,7 @@ vet:
 # Format code
 fmt:
 	go fmt ./...
-	goimports -w -local github.com/zero-trust-hive/cli .
+	goimports -w -local github.com/AhirTech1/zero-trust-hive .
 
 # Full CI check — lint, vet, test
 check: lint vet test

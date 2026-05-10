@@ -1,18 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// Package network — QUIC Listener (Ghost Endpoint)
-// ─────────────────────────────────────────────────────────────────────────────
-// Listens on UDP 0.0.0.0:443 for incoming QUIC connections from Edge Agents.
-// Each agent must send its agent ID on the first stream after connecting.
-// Once identified, the agent is registered in the Router and monitored by
-// the zero-zombie watchdog.
-//
-// Protocol:
-//  1. Agent opens QUIC connection to gateway:443
-//  2. Agent opens a stream and writes its agent ID (UTF-8)
-//  3. Gateway reads the ID, registers the agent, and logs the event
-//  4. The connection remains open for command dispatch via the Control API
-//
-// ─────────────────────────────────────────────────────────────────────────────
 package network
 
 import (
@@ -24,130 +9,96 @@ import (
 	"net"
 
 	"github.com/quic-go/quic-go"
+	"github.com/AhirTech1/zero-trust-hive/internal/auth"
 )
 
-const (
-	// quicListenAddr — the UDP address the QUIC listener binds to.
-	// Port 443 is the standard QUIC/HTTP3 port.
-	quicListenAddr = "0.0.0.0:443"
+const maxAgentIDLen = 256
 
-	// maxAgentIDLen — maximum length of an agent ID string. Any ID longer
-	// than this is rejected to prevent resource exhaustion attacks.
-	maxAgentIDLen = 256
-)
-
-// ─────────────────────────────────────────────────────────────────────────────
-// StartQUICListener — main QUIC accept loop
-// ─────────────────────────────────────────────────────────────────────────────
-// Binds a UDP socket on 0.0.0.0:443, creates a QUIC listener with the
-// provided TLS config, and enters an accept loop. Each accepted connection
-// is handled in its own goroutine.
-//
-// The listener shuts down gracefully when the context is cancelled (e.g.,
-// on SIGINT/SIGTERM).
-// ─────────────────────────────────────────────────────────────────────────────
-
-func StartQUICListener(ctx context.Context, tlsConfig *tls.Config, router *Router) error {
-	// ── Bind the UDP socket ────────────────────────────────────────────
-	udpAddr, err := net.ResolveUDPAddr("udp", quicListenAddr)
+// StartQUICListener binds a UDP socket and enters the QUIC accept loop.
+func StartQUICListener(ctx context.Context, tlsConfig *tls.Config, router *Router, agentAuth *auth.AgentAuth) error {
+	udpAddr, err := net.ResolveUDPAddr("udp", tlsConfig.ServerName)
 	if err != nil {
-		return fmt.Errorf("failed to resolve UDP address %s: %w", quicListenAddr, err)
+		// ServerName may be empty for 0.0.0.0 listeners.
+		udpAddr, err = net.ResolveUDPAddr("udp", "0.0.0.0:443")
+		if err != nil {
+			return fmt.Errorf("failed to resolve UDP address: %w", err)
+		}
 	}
 
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %w", quicListenAddr, err)
+		return fmt.Errorf("failed to listen on %s: %w", udpAddr, err)
 	}
 
-	// ── Create the QUIC transport and listener ─────────────────────────
-	transport := &quic.Transport{
-		Conn: udpConn,
-	}
+	transport := &quic.Transport{Conn: udpConn}
 
 	listener, err := transport.Listen(tlsConfig, &quic.Config{
-		// Allow long-lived connections (agents may stay connected for hours).
-		MaxIdleTimeout: 0, // No idle timeout — agents keep-alive themselves.
+		MaxIdleTimeout: 0,
 	})
 	if err != nil {
 		udpConn.Close()
 		return fmt.Errorf("failed to create QUIC listener: %w", err)
 	}
 
-	log.Printf("[QUIC] ✓ Ghost Endpoint listening on %s (UDP/QUIC)", quicListenAddr)
+	log.Printf("[QUIC] Ghost Endpoint listening on %s (UDP/QUIC)", udpAddr)
 
-	// ── Accept loop ────────────────────────────────────────────────────
-	// Runs in its own goroutine. The outer caller can proceed to start
-	// the HTTP control API concurrently.
 	go func() {
 		defer listener.Close()
 		defer udpConn.Close()
 		defer transport.Close()
 
 		for {
-			// Accept blocks until a new connection arrives or the listener
-			// is closed (via context cancellation).
 			conn, err := listener.Accept(ctx)
 			if err != nil {
-				// Check if the context was cancelled (graceful shutdown).
 				if ctx.Err() != nil {
 					log.Printf("[QUIC] Listener shutting down (context cancelled)")
 					return
 				}
-				log.Printf("[QUIC] ⚠ Accept error: %v", err)
+				log.Printf("[QUIC] Accept error: %v", err)
 				continue
 			}
-
-			// Handle each connection in its own goroutine.
-			go handleAgentConnection(ctx, conn, router)
+			go handleAgentConnection(ctx, conn, router, agentAuth)
 		}
 	}()
 
 	return nil
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// handleAgentConnection — processes a newly accepted QUIC connection
-// ─────────────────────────────────────────────────────────────────────────────
-// The agent must open a stream and send its ID within a reasonable time.
-// Once identified, the agent is registered in the routing table. The
-// connection then stays open for command dispatch.
-// ─────────────────────────────────────────────────────────────────────────────
-
-func handleAgentConnection(ctx context.Context, conn *quic.Conn, router *Router) {
+// handleAgentConnection processes a newly accepted QUIC connection.
+func handleAgentConnection(ctx context.Context, conn *quic.Conn, router *Router, agentAuth *auth.AgentAuth) {
 	remoteAddr := conn.RemoteAddr().String()
 	log.Printf("[QUIC] New connection from %s", remoteAddr)
 
-	// ── Wait for the agent's identification stream ─────────────────────
-	// The agent must open a stream and write its agent ID.
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
-		log.Printf("[QUIC] ⚠ Failed to accept ID stream from %s: %v", remoteAddr, err)
+		log.Printf("[QUIC] Failed to accept ID stream from %s: %v", remoteAddr, err)
 		conn.CloseWithError(1, "failed to accept identification stream")
 		return
 	}
 
-	// Read the agent ID from the stream (limited to maxAgentIDLen bytes
-	// to prevent memory exhaustion from malicious clients).
 	idBytes, err := io.ReadAll(io.LimitReader(stream, maxAgentIDLen))
 	if err != nil {
-		log.Printf("[QUIC] ⚠ Failed to read agent ID from %s: %v", remoteAddr, err)
+		log.Printf("[QUIC] Failed to read agent ID from %s: %v", remoteAddr, err)
 		conn.CloseWithError(2, "failed to read agent identification")
 		return
 	}
+	stream.Close()
 
-	agentID := string(idBytes)
-	if agentID == "" {
-		log.Printf("[QUIC] ⚠ Empty agent ID from %s — rejecting", remoteAddr)
+	rawPayload := string(idBytes)
+	if rawPayload == "" {
+		log.Printf("[QUIC] Empty agent ID from %s — rejecting", remoteAddr)
 		conn.CloseWithError(3, "empty agent ID")
 		return
 	}
 
-	// Close the identification stream — it's no longer needed.
-	stream.Close()
+	// Validate agent identity if agent authentication is enabled.
+	agentID, err := agentAuth.ValidateAgentID(rawPayload)
+	if err != nil {
+		log.Printf("[QUIC] Agent authentication failed from %s: %v", remoteAddr, err)
+		conn.CloseWithError(4, fmt.Sprintf("agent authentication failed: %v", err))
+		return
+	}
 
-	// ── Register the agent ─────────────────────────────────────────────
-	// This also spawns the zero-zombie watchdog goroutine automatically.
 	router.Register(agentID, conn)
-
-	log.Printf("[QUIC] ✓ Agent %q authenticated from %s", agentID, remoteAddr)
+	log.Printf("[QUIC] Agent %q authenticated from %s", agentID, remoteAddr)
 }

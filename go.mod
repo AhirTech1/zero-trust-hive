@@ -1,4 +1,4 @@
-module github.com/zero-trust-hive/cli
+module github.com/AhirTech1/zero-trust-hive
 
 go 1.26.2
 

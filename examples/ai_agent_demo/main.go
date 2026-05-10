@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zero-trust-hive/cli/internal/auth"
-	"github.com/zero-trust-hive/cli/internal/network"
-	"github.com/zero-trust-hive/cli/internal/tui"
+	"github.com/AhirTech1/zero-trust-hive/internal/auth"
+	"github.com/AhirTech1/zero-trust-hive/internal/network"
+	"github.com/AhirTech1/zero-trust-hive/internal/tui"
 )
 
 const (

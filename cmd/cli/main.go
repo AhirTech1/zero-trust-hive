@@ -1,16 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// Zero-Trust Hive — CLI Entry Point
-// ─────────────────────────────────────────────────────────────────────────────
-// The operator and AI-agent-facing CLI for Zero-Trust Hive.
-//
-// Subcommands:
-//
-//	hive init                           - Generate a .env file with a secure token
-//	hive list                           - Query the Gateway for active agents
-//	hive exec -target <id> -cmd <json>  - Dispatch a command via the Gateway
-//	hive help                           - Print the detailed operator manual
-//
-// ─────────────────────────────────────────────────────────────────────────────
 package main
 
 import (
@@ -30,12 +17,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 
-	"github.com/zero-trust-hive/cli/internal/auth"
-	"github.com/zero-trust-hive/cli/internal/network"
-	"github.com/zero-trust-hive/cli/internal/tui"
+	"github.com/AhirTech1/zero-trust-hive/internal/auth"
+	"github.com/AhirTech1/zero-trust-hive/internal/config"
+	"github.com/AhirTech1/zero-trust-hive/internal/network"
+	"github.com/AhirTech1/zero-trust-hive/internal/tui"
 )
-
-const gatewayURL = "http://localhost:8080"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -55,7 +41,7 @@ func main() {
 	case "help":
 		printHelp()
 	default:
-		fmt.Println(tui.ErrorStyle.Render(fmt.Sprintf("  ✗ Unknown command: %s\n", subcommand)))
+		fmt.Println(tui.ErrorStyle.Render(fmt.Sprintf("  Unknown command: %s\n", subcommand)))
 		printUsage()
 		os.Exit(1)
 	}
@@ -64,7 +50,8 @@ func main() {
 func printUsage() {
 	fmt.Println(tui.RenderBanner())
 	fmt.Println(tui.AccentStyle.Render("  Usage: hive <command> [arguments]"))
-	fmt.Println("\n  Commands:")
+	fmt.Println()
+	fmt.Println("  Commands:")
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    init    "), tui.SubtleStyle.Render("Generate a secure .env configuration file")))
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    list    "), tui.SubtleStyle.Render("List active Edge Agents connected to the Cloud Gateway")))
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left, tui.ValueStyle.Render("    exec    "), tui.SubtleStyle.Render("Execute a command or forward a payload to an Edge Agent")))
@@ -94,6 +81,7 @@ func printHelp() {
 	fmt.Println()
 	fmt.Println(tui.ValueStyle.Render("     Usage: hive list"))
 	fmt.Println(tui.WarningStyle.Render("     Requires: HIVE_JWT_SECRET environment variable"))
+	fmt.Println(tui.SubtleStyle.Render("     Optional: HIVE_GATEWAY_URL (default: http://localhost:8080)"))
 	fmt.Println()
 
 	fmt.Println(tui.AccentStyle.Render("  3. COMMAND EXECUTION & PROXYING (hive exec)"))
@@ -101,11 +89,9 @@ func printHelp() {
 	fmt.Println(tui.SubtleStyle.Render("     All commands pass through the Gateway's Semantic Firewall which blocks"))
 	fmt.Println(tui.SubtleStyle.Render("     AI-hallucinated destructive strings (e.g., rm -rf) and SQL injection."))
 	fmt.Println()
-	fmt.Println(tui.SubtleStyle.Render("     Use JSON Envelopes to instruct the Agent Sidecar to proxy native HTTP/TCP"))
-	fmt.Println(tui.SubtleStyle.Render("     requests to local databases, APIs, or microservices."))
-	fmt.Println()
 	fmt.Println(tui.ValueStyle.Render("     Usage: hive exec -target <agent-id> -cmd <payload>"))
 	fmt.Println(tui.WarningStyle.Render("     Requires: HIVE_JWT_SECRET environment variable"))
+	fmt.Println(tui.SubtleStyle.Render("     Optional: HIVE_GATEWAY_URL (default: http://localhost:8080)"))
 	fmt.Println()
 	fmt.Println(tui.ValueStyle.Render("     Direct Execution Example:"))
 	fmt.Println(tui.SubtleStyle.Render("     hive exec -target node-01 -cmd 'uptime'"))
@@ -117,9 +103,9 @@ func printHelp() {
 	fmt.Println(tui.SubtleStyle.Render(strings.Repeat(tui.DividerChar, 80)))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// runExec — hive exec
-// ─────────────────────────────────────────────────────────────────────────────
+func gatewayURL() string {
+	return config.LoadFromEnv().GatewayURL
+}
 
 func runExec(args []string) {
 	cmd := flag.NewFlagSet("exec", flag.ExitOnError)
@@ -128,12 +114,11 @@ func runExec(args []string) {
 	cmd.Parse(args)
 
 	if *target == "" || *payload == "" {
-		fmt.Println(tui.ErrorStyle.Render("  ✗ Both -target and -cmd are required."))
+		fmt.Println(tui.ErrorStyle.Render("  Both -target and -cmd are required."))
 		fmt.Println("  Example: hive exec -target agent-001 -cmd 'uptime'")
 		os.Exit(1)
 	}
 
-	// Generate a short-lived JWT from the shared secret.
 	token := getJWT("hive-cli", "execute")
 
 	reqBody := network.ExecuteRequest{
@@ -142,7 +127,7 @@ func runExec(args []string) {
 	}
 
 	b, _ := json.Marshal(reqBody)
-	req, err := http.NewRequest("POST", gatewayURL+"/execute", bytes.NewBuffer(b))
+	req, err := http.NewRequest("POST", gatewayURL()+"/execute", bytes.NewBuffer(b))
 	if err != nil {
 		exitWithError("Failed to create request", err)
 	}
@@ -150,7 +135,7 @@ func runExec(args []string) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	fmt.Println(tui.SubtleStyle.Render(fmt.Sprintf("  ▸ Dispatching to %s...", *target)))
+	fmt.Println(tui.SubtleStyle.Render(fmt.Sprintf("  Dispatching to %s...", *target)))
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -164,7 +149,7 @@ func runExec(args []string) {
 	json.Unmarshal(bodyBytes, &execResp)
 
 	if resp.StatusCode != 200 {
-		fmt.Println(tui.ErrorStyle.Render(fmt.Sprintf("  ✗ Gateway Error (HTTP %d)", resp.StatusCode)))
+		fmt.Println(tui.ErrorStyle.Render(fmt.Sprintf("  Gateway Error (HTTP %d)", resp.StatusCode)))
 		if execResp.Error != "" {
 			fmt.Println(tui.ValueStyle.Render("    " + execResp.Error))
 		} else {
@@ -173,30 +158,23 @@ func runExec(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println(tui.SuccessStyle.Render("  ✓ Execution Successful:"))
+	fmt.Println(tui.SuccessStyle.Render("  Execution Successful:"))
 	fmt.Println()
-	// Print the structured stdout from the agent.
 	fmt.Println(string(execResp.Stdout))
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// runList — hive list
-// ─────────────────────────────────────────────────────────────────────────────
 
 func runList(args []string) {
 	cmd := flag.NewFlagSet("list", flag.ExitOnError)
 	cmd.Parse(args)
 
-	// Generate a short-lived JWT from the shared secret.
 	token := getJWT("hive-cli", "read")
 
-	req, err := http.NewRequest("GET", gatewayURL+"/agents", nil)
+	req, err := http.NewRequest("GET", gatewayURL()+"/agents", nil)
 	if err != nil {
 		exitWithError("Failed to create request", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	// Fetch
 	var fetchErr error
 	var agents []network.AgentInfo
 
@@ -212,7 +190,7 @@ func runList(args []string) {
 			defer resp.Body.Close()
 
 			if resp.StatusCode == http.StatusUnauthorized {
-				fetchErr = fmt.Errorf("authentication failed (HTTP 401) — check HIVE_API_TOKEN")
+				fetchErr = fmt.Errorf("authentication failed (HTTP 401) — check HIVE_JWT_SECRET")
 				return
 			}
 
@@ -237,14 +215,13 @@ func runList(args []string) {
 		exitWithError("Failed to list agents", fetchErr)
 	}
 
-	// Calculate terminal width for responsive layout
 	width, _, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil || width < 40 {
-		width = 80 // fallback
+		width = 80
 	}
 
 	if len(agents) == 0 {
-		fmt.Println(tui.WarningStyle.Render("  ⚠ No active agents connected to the Gateway."))
+		fmt.Println(tui.WarningStyle.Render("  No active agents connected to the Gateway."))
 		return
 	}
 
@@ -255,7 +232,6 @@ func runList(args []string) {
 	uptimeStyle := lipgloss.NewStyle().Foreground(tui.ColorSlate).Width(width / 3)
 	timeStyle := lipgloss.NewStyle().Foreground(tui.ColorDarkGray).Width(width / 3)
 
-	// Header row
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Left,
 		idStyle.Render("  AGENT ID"),
 		uptimeStyle.Render("UPTIME"),
@@ -272,40 +248,28 @@ func runList(args []string) {
 	fmt.Println(tui.SubtleStyle.Render(strings.Repeat(tui.DividerChar, width-4)))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// runInit — hive init (Cloud-Agnostic Bootstrap)
-// ─────────────────────────────────────────────────────────────────────────────
-// Generates a .env file with a cryptographically random HIVE_API_TOKEN and
-// prints clear instructions for deploying the Gateway on any cloud provider.
-// ─────────────────────────────────────────────────────────────────────────────
-
 func runInit(_ []string) {
 	fmt.Println(tui.RenderBanner())
 	fmt.Println(tui.SubtleStyle.Render("  Initializing Zero-Trust Hive configuration...\n"))
 
-	// Generate a cryptographically secure 32-byte hex secret.
 	secretBytes := make([]byte, 32)
 	if _, err := rand.Read(secretBytes); err != nil {
 		exitWithError("Failed to generate secure secret — system entropy exhausted", err)
 	}
 	jwtSecret := hex.EncodeToString(secretBytes)
 
-	// Generate a bootstrap JWT token signed with this secret.
 	bootstrapToken, err := auth.GenerateToken(jwtSecret, "hive-admin", "admin")
 	if err != nil {
 		exitWithError("Failed to generate bootstrap JWT", err)
 	}
 
-	// Write the .env file.
 	envContent := fmt.Sprintf(`# Zero-Trust Hive — Generated Configuration
 # Created by 'hive init'
 
 # HMAC-SHA256 secret for JWT token signing/validation.
-# The Gateway and CLI must share this secret.
 HIVE_JWT_SECRET=%s
 
 # Bootstrap JWT token (valid 24 hours, scope: admin).
-# Use this immediately to authenticate with the Gateway.
 HIVE_BOOTSTRAP_TOKEN=%s
 `, jwtSecret, bootstrapToken)
 
@@ -313,10 +277,9 @@ HIVE_BOOTSTRAP_TOKEN=%s
 		exitWithError("Failed to write .env file", err)
 	}
 
-	fmt.Println(tui.SuccessStyle.Render("  ✓ Generated .env with HIVE_JWT_SECRET and bootstrap token"))
+	fmt.Println(tui.SuccessStyle.Render("  Generated .env with HIVE_JWT_SECRET and bootstrap token"))
 	fmt.Println()
 
-	// Print the deployment instructions.
 	fmt.Println(tui.HeaderStyle.Render("  DEPLOYMENT INSTRUCTIONS  "))
 	divider := tui.SubtleStyle.Render(strings.Repeat(tui.DividerChar, 60))
 	fmt.Println(divider)
@@ -345,17 +308,13 @@ HIVE_BOOTSTRAP_TOKEN=%s
 	fmt.Println(divider)
 
 	fmt.Println()
-	fmt.Println(tui.WarningStyle.Render("  ⚠ Keep your .env file secure. It contains your JWT signing secret."))
+	fmt.Println(tui.WarningStyle.Render("  Keep your .env file secure. It contains your JWT signing secret."))
 	fmt.Println()
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
 func exitWithError(message string, err error) {
 	fmt.Println()
-	fmt.Println(tui.ErrorStyle.Render(fmt.Sprintf("  ✗ %s", message)))
+	fmt.Println(tui.ErrorStyle.Render(fmt.Sprintf("  %s", message)))
 	if err != nil {
 		fmt.Println(tui.SubtleStyle.Render(fmt.Sprintf("    Error: %v", err)))
 	}
@@ -363,7 +322,6 @@ func exitWithError(message string, err error) {
 	os.Exit(1)
 }
 
-// getJWT reads HIVE_JWT_SECRET and generates a short-lived JWT for API calls.
 func getJWT(subject, scope string) string {
 	secret := os.Getenv("HIVE_JWT_SECRET")
 	if secret == "" {
