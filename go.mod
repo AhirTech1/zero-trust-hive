@@ -6,7 +6,7 @@ require (
 	github.com/charmbracelet/huh/spinner v0.0.0-20260223110133-9dc45e34a40b
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/quic-go/quic-go v0.59.0
+	github.com/quic-go/quic-go v0.59.1
 	golang.org/x/term v0.42.0
 )
 
